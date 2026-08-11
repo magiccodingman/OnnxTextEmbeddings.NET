@@ -14,30 +14,26 @@ options.Inference.ConcurrentRequestsPerModel = 0; // automatic
 - `ThreadsPerModel` — ONNX Runtime intra-op thread count for each session.
 - `ConcurrentRequestsPerModel` — simultaneous `Run()` calls allowed against each session.
 
-## Automatic concurrency profiles
+## Automatic concurrency
 
-Automatic mode first computes approximately half the configured thread count, with a minimum of one, then applies the model profile cap.
+Automatic mode resolves to approximately half the configured model thread count, minimum one, capped at eight:
 
 ```text
-automatic = min(max(ThreadsPerModel / 2, 1), profileCap)
+max(1, min(ThreadsPerModel / 2, 8))
 ```
 
-Profile caps:
+| Threads/model | Automatic concurrent requests/model |
+|---:|---:|
+| 1 | 1 |
+| 2 | 1 |
+| 4 | 2 |
+| 8 | 4 |
+| 12 | 6 |
+| 16 | 8 |
+| 24 | 8 |
+| 32 | 8 |
 
-| Model selection | Automatic cap |
-|---|---:|
-| Jasper INT8 | **5** |
-| Jasper INT4 | 4 |
-| Jasper FP32 | 4 |
-| Custom Hugging Face/local/HTTP model | 4 |
-
-At 16 threads/model the defaults therefore resolve to 5 for the built-in Jasper INT8 preset and 4 for the others. These values come from observed CPU throughput/value behavior rather than an ONNX Runtime hard limit.
-
-Explicit positive values remain honored:
-
-```csharp
-options.Inference.ConcurrentRequestsPerModel = 7;
-```
+The cap is a package default, not an ONNX Runtime hard limit. Explicit positive values remain honored.
 
 ## Least-loaded routing
 
@@ -48,21 +44,25 @@ global bounded queue
         ↓
 least-loaded healthy scheduler
         ↓
-A 3/5
-B 2/5  ← next request
+A 3/8
+B 2/8  ← next request
 C recovering (not eligible)
 ```
 
-Ties use a rotating cursor. Therefore:
+Ties use a rotating cursor. Two idle instances receiving two requests therefore receive one request each.
 
-```text
-A 0/5    B 0/5
-request 1 → A
-A 1/5    B 0/5
-request 2 → B
-```
+## Why multiple model instances are not the default performance strategy
 
-This preserves even utilization when instances are equally available while still preferring whichever instance becomes less loaded under uneven execution times.
+Loading another model copy usually costs a lot of RAM and **usually does not produce another proportional throughput gain**. On typical CPU systems, once one session is sufficiently busy, the limiting resource tends to be shared hardware such as memory bandwidth, caches, memory controllers/interconnects, or broader motherboard/platform throughput. The exact limiter varies by CPU and system, but it is often not "we need another model in RAM."
+
+`ModelInstanceCount > 1` therefore exists primarily for:
+
+- experimentation and benchmarking;
+- unusual CPU/memory/NUMA topologies;
+- future architecture-specific scheduling/affinity work;
+- machines where measurements actually show a second session helps.
+
+A possible experimental optimization is to isolate model instances by CPU topology—such as NUMA nodes, CPU groups, or AMD CCD-related layouts—and preserve memory locality so sessions contend less for shared bandwidth/cache. That needs per-platform benchmarking and is not assumed to improve every machine.
 
 ## Slot accounting
 
@@ -92,30 +92,7 @@ If replacement creation fails, the instance stays out of rotation and retries wi
 
 ## Traffic during recovery
 
-With multiple instances:
-
-```text
-A recovering
-B healthy
-```
-
-new work routes only to B, subject to B's normal concurrency limit.
-
-With only one instance:
-
-```text
-global queue
-   ↓
-A recovering
-   ↓
-queue waits
-   ↓
-A generation 2 healthy
-   ↓
-queue resumes
-```
-
-The queue remains bounded. Once its capacity is full, producers asynchronously wait instead of causing unbounded memory growth.
+With multiple instances, new work routes only to healthy copies. With one instance, the global queue waits for the replacement session to become healthy, then resumes. The queue remains bounded; once it is full, producers asynchronously wait instead of creating unbounded memory growth.
 
 ## Request retry policy
 
@@ -125,7 +102,7 @@ Memory-pressure failures are different. They quarantine and rebuild the affected
 
 ## OOM boundary
 
-The package can recover from failures that leave the .NET process alive, including model/session allocation failures surfaced to managed code. It cannot self-heal after the operating system, container runtime, or cgroup kills the entire process. Configure systemd, Kubernetes, your service manager, or another process supervisor for process-level restart.
+The package can recover from failures that leave the .NET process alive. It cannot self-heal after the operating system, container runtime, or cgroup kills the entire process. Configure systemd, Kubernetes, your service manager, or another process supervisor for process-level restart.
 
 ## Runtime diagnostics
 

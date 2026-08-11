@@ -39,9 +39,11 @@ Application-wide document/query token limits can be overridden per call. Documen
 
 A model instance is one ONNX `InferenceSession`, not one request slot. Each healthy instance can execute several concurrent `Run()` calls.
 
-A single scheduler owns routing decisions. It tracks active request counts and chooses the least-loaded healthy instance with available capacity. Ties rotate between equal instances. This replaces nondeterministic competition between channel readers.
+A single scheduler owns routing decisions. It tracks active request counts and chooses the least-loaded healthy instance with available capacity. Ties rotate between equal instances. Native inference is launched independently after reservation so the central scheduler remains free to route the rest of a burst.
 
-Default automatic concurrency profiles at 16 threads are 5 for built-in Jasper INT8 and 4 for other/custom models.
+Automatic request concurrency is `ThreadsPerModel / 2`, minimum one, capped at eight. With 16 threads/model, one model instance therefore exposes eight request slots by default.
+
+Additional model copies are supported but deliberately not treated as a normal scaling primitive. CPU inference frequently runs into shared memory/cache/interconnect/platform throughput before it runs out of model instances, so extra sessions often add RAM without adding meaningful throughput. The multi-instance machinery is useful for experimentation, odd hardware topologies, HA recovery behavior, and future CPU/NUMA/affinity tuning.
 
 ## Instance recovery
 

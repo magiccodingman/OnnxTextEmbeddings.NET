@@ -10,7 +10,7 @@ dotnet add package OnnxTextEmbeddings.NET
 builder.Services.AddOnnxTextEmbeddings();
 ```
 
-The default registration uses Jasper INT8 on CPU, **one model instance with 16 threads and up to 5 automatic concurrent inference calls**, 1024-token document chunks, a 1024-token query ceiling, and FP32 returned vectors for maximum interoperability.
+The default registration uses Jasper INT8 on CPU, **one model instance with 16 threads and up to 8 automatic concurrent inference calls**, 1024-token document chunks, a 1024-token query ceiling, and FP32 returned vectors for maximum interoperability.
 
 For applications that persist many embeddings, INT8 is the recommended compact default:
 
@@ -86,9 +86,11 @@ var results = await semanticSearch.SearchAsync(
 
 ## 7. Tune concurrency only if needed
 
-With 16 threads/model, automatic concurrency is **5 for the built-in Jasper INT8 preset** and **4 for Jasper INT4, Jasper FP32, and custom models**. Explicit `ConcurrentRequestsPerModel` values are still honored.
+Automatic request concurrency is `ThreadsPerModel / 2`, capped at eight, so the normal 16-thread configuration exposes eight request slots on one model copy.
 
-If benchmarks justify multiple model copies, set `ModelInstanceCount > 1`. Requests are routed to the healthy instance with the fewest active requests, and a failed instance is removed from rotation while a fresh session is created. See [concurrency.md](concurrency.md).
+Only increase `ModelInstanceCount` if you are deliberately experimenting or benchmarks on the target hardware show a benefit. Extra model copies usually consume more RAM without increasing aggregate CPU throughput because they still contend for the same memory/cache/platform resources. The multi-instance scheduler is there for unusual setups, recovery, and future topology-aware experiments—not because more copies are normally faster.
+
+See [concurrency.md](concurrency.md).
 
 ## 8. Persist embeddings
 

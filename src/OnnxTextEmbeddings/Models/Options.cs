@@ -47,9 +47,7 @@ public sealed class ModelOptions
     public string? ModelFile { get; set; }
     public ModelUpdatePolicy UpdatePolicy { get; set; } = ModelUpdatePolicy.OnStartup;
 
-    /// <summary>
-    /// Identifies a built-in Jasper tuning profile. Null means the model is custom and global inference defaults apply.
-    /// </summary>
+    /// <summary>Identifies the selected built-in Jasper preset when one is in use.</summary>
     public JasperModelPrecision? JasperPrecision { get; private set; } = JasperModelPrecision.Int8;
 
     public void UseJasper(JasperModelPrecision precision)
@@ -101,8 +99,7 @@ public sealed class ModelCacheOptions
 public static class InferenceDefaults
 {
     public const int ThreadsPerModel = 16;
-    public const int AutomaticConcurrentRequestsPerModelCap = 4;
-    public const int JasperInt8AutomaticConcurrentRequestsPerModelCap = 5;
+    public const int AutomaticConcurrentRequestsPerModelCap = 8;
 }
 
 internal sealed record ResolvedInferenceOptions(
@@ -143,7 +140,7 @@ public sealed class InferenceOptions
 
     /// <summary>
     /// Simultaneous inference calls allowed per model instance. Zero means automatic: ThreadsPerModel / 2,
-    /// capped at four globally or five for the built-in Jasper INT8 preset. Explicit positive values are honored as-is.
+    /// capped at eight. Explicit positive values are honored as-is.
     /// </summary>
     public int ConcurrentRequestsPerModel { get; set; }
 
@@ -172,17 +169,14 @@ public sealed class InferenceOptions
 
     internal ResolvedInferenceOptions Resolve(JasperModelPrecision? jasperPrecision = null)
     {
+        _ = jasperPrecision; // Preset identity is intentionally not part of automatic concurrency policy.
         var threads = ThreadsPerModel > 0
             ? ThreadsPerModel
             : Math.Max(1, Math.Min(MaximumAutoThreadsPerModel, Environment.ProcessorCount / ModelInstanceCount));
 
-        var automaticCap = jasperPrecision == JasperModelPrecision.Int8
-            ? InferenceDefaults.JasperInt8AutomaticConcurrentRequestsPerModelCap
-            : InferenceDefaults.AutomaticConcurrentRequestsPerModelCap;
-
         var concurrency = ConcurrentRequestsPerModel > 0
             ? ConcurrentRequestsPerModel
-            : Math.Clamp(threads / 2, 1, automaticCap);
+            : Math.Clamp(threads / 2, 1, InferenceDefaults.AutomaticConcurrentRequestsPerModelCap);
 
         return new ResolvedInferenceOptions(ModelInstanceCount, threads, concurrency, QueueCapacity);
     }

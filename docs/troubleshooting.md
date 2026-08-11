@@ -49,6 +49,12 @@ The global bounded queue waits for at least one instance to recover. Once its co
 
 In-process model recovery works only while the .NET process remains alive. If Linux OOM killer, a container/cgroup, Windows, or a service host terminates the whole process, use process-level supervision (systemd, Kubernetes, Windows Service recovery, etc.) to restart it.
 
+## Too much CPU contention
+
+Start by reducing `ConcurrentRequestsPerModel` or `ThreadsPerModel`. The default topology is one model instance, 16 threads/model, and automatic concurrency of eight.
+
+If multiple model instances were explicitly configured, reducing `ModelInstanceCount` also reduces CPU and model-memory pressure. Multiple copies usually **do not** improve throughput on ordinary CPU systems because they continue competing for the same memory/cache/platform resources. Keep one model instance unless benchmarks on that exact machine prove an advantage.
+
 ## `EmbeddingSpaceMismatchException`
 
 The query fingerprint and stored document fingerprint differ. Regenerate persisted embeddings with the active model space; equal dimensions alone do not make vectors compatible.
@@ -62,12 +68,6 @@ options.Model.ModelFile = "model-int8.onnx";
 ## Download fails but old model exists
 
 During an update, the active runtime remains in service if the candidate fails. Inspect `ITextEmbeddingService.Status.LastError` and logs for the download/validation failure.
-
-## Too much CPU contention
-
-Start by reducing `ConcurrentRequestsPerModel` or `ThreadsPerModel`. Automatic defaults are 5 concurrent calls/model for Jasper INT8 and 4 for the global/custom profile at the normal 16 threads.
-
-If multiple model instances were explicitly configured, reducing `ModelInstanceCount` also reduces CPU and model-memory pressure. Do not add model instances merely to gain ordinary request concurrency; one session already supports concurrent calls.
 
 ## Search looks wrong after a deployment
 

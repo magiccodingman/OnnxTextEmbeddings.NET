@@ -10,7 +10,7 @@ builder.Services.AddOnnxTextEmbeddings(options =>
 
     options.Inference.ModelInstanceCount = 1;
     options.Inference.ThreadsPerModel = 16;
-    options.Inference.ConcurrentRequestsPerModel = 0; // automatic
+    options.Inference.ConcurrentRequestsPerModel = 0; // auto: 8 at 16 threads
     options.Inference.QueueCapacity = 256;
 
     options.Chunking.ChunkOverlapTokens = 0;
@@ -53,33 +53,21 @@ if (count.Fits)
 
 A query override changes only its acceptance ceiling; it never enables query chunking or silent truncation. `FitsModelLimit` still protects the model's actual hard maximum.
 
-## Token counting without limit exceptions
-
-```csharp
-int sourceTokens = await embeddingService.CountTokensAsync(text);
-QueryTokenCount count = await embeddingService.CountQueryTokensAsync(text);
-```
-
-`CountTokensAsync` returns source tokens. `CountQueryTokensAsync` evaluates final model-input tokens and returns the configured/request limit plus the model hard limit. Counting an oversized query reports `Fits = false` without throwing merely because the text is too long.
-
 ## Model instances, threads, and concurrency
 
 `ModelInstanceCount` controls independent ONNX sessions/model copies. Default: one.
 
 `ThreadsPerModel` controls ONNX Runtime intra-op threads for each model instance. Default: 16.
 
-`ConcurrentRequestsPerModel = 0` means automatic. At 16 threads:
+`ConcurrentRequestsPerModel = 0` means automatic:
 
 ```text
-Jasper INT8 → 5
-Jasper INT4 → 4
-Jasper FP32 → 4
-custom model → 4
+max(1, min(ThreadsPerModel / 2, 8))
 ```
 
-For lower thread counts, automatic concurrency remains approximately `ThreadsPerModel / 2` until it reaches the model profile cap. Explicit positive values are not silently capped.
+At the default 16 threads/model this resolves to eight concurrent calls. Explicit positive values are not silently capped.
 
-`UseJasper(JasperModelPrecision.Int8)` carries the built-in INT8 tuning profile. Calling `UseHuggingFace`, `UseLocalDirectory`, or `UseHttpManifest` selects the global/custom-model profile instead of guessing from a repository filename.
+Multiple model instances are **not** expected to be a general throughput multiplier. They normally increase RAM use far more reliably than they increase throughput because CPU embedding workloads often become constrained by the shared memory/cache/interconnect/platform subsystem first. Keep one instance unless benchmarks on the target hardware show otherwise; multiple copies mainly exist for experimentation, unusual memory/NUMA layouts, and future CPU-topology-aware affinity work.
 
 See [concurrency.md](concurrency.md).
 

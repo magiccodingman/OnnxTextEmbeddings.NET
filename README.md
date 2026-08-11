@@ -92,19 +92,16 @@ Default model topology:
 ```text
 ModelInstanceCount = 1
 ThreadsPerModel = 16
-ConcurrentRequestsPerModel = Auto
+ConcurrentRequestsPerModel = Auto → 8
 ```
 
-Automatic concurrency uses `ThreadsPerModel / 2` and then applies a benchmark-derived model profile:
-
-- built-in Jasper INT8: cap **5** concurrent requests/model
-- Jasper INT4: global cap **4**
-- Jasper FP32: global cap **4**
-- custom models: global cap **4**
-
-Explicit positive `ConcurrentRequestsPerModel` values always win.
+Automatic concurrency is `ThreadsPerModel / 2`, minimum one, capped at **8**. Explicit positive `ConcurrentRequestsPerModel` values always win.
 
 If multiple model instances are deliberately loaded, work is routed to the **healthy instance with the fewest active requests**, with rotating tie-breaking. Two idle model instances receiving two requests therefore receive one request each rather than filling one model first.
+
+**Multiple model instances usually do not increase aggregate throughput on a normal CPU host.** Once one model instance is busy enough, the bottleneck is commonly somewhere in the shared CPU/memory subsystem—often memory bandwidth/cache/memory-controller or board-level throughput—not a shortage of model copies. `ModelInstanceCount > 1` exists for experimentation, unusual hardware/topologies, and future tuning work rather than as a general performance recommendation.
+
+One potentially useful future/experimental direction is CPU-topology-aware isolation: pinning model sessions/threads to distinct CPU groups, NUMA nodes, or architecture-specific regions (for example AMD CCD/NUMA layouts) and keeping their memory locality separate so copies steal less bandwidth/cache from one another. The package does **not** assume this will help every machine; it is something to benchmark per CPU/platform.
 
 ## Self-healing model instances
 
@@ -176,7 +173,7 @@ DocumentChunkMaxTokens        1024
 QueryMaxTokens                1024
 ModelInstanceCount            1
 ThreadsPerModel               16
-ConcurrentRequestsPerModel    Auto (5 for Jasper INT8; 4 global/custom)
+ConcurrentRequestsPerModel    Auto (8 at 16 threads/model)
 QueueCapacity                 256
 ChunkOverlapTokens            0
 RepeatHeadingContext          true

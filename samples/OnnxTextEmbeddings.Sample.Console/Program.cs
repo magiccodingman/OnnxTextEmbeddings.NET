@@ -23,10 +23,8 @@ Console.WriteLine($"Instances: {embeddings.ModelInfo?.ModelInstanceCount}; Threa
 
 if (embeddings.ModelInfo?.Dimensions != 2048)
     throw new InvalidOperationException($"Expected Jasper to produce 2048 dimensions, got {embeddings.ModelInfo?.Dimensions}.");
-var expectedConcurrency = precision == JasperModelPrecision.Int8 ? 5 : 4;
-if (embeddings.ModelInfo is not { ModelInstanceCount: 1, ThreadsPerModel: 16 } runtime ||
-    runtime.ConcurrentRequestsPerModel != expectedConcurrency || runtime.HealthyModelInstanceCount != 1)
-    throw new InvalidOperationException($"Unexpected inference topology for Jasper {precision}; expected one healthy model, 16 threads, and {expectedConcurrency} concurrent requests/model.");
+if (embeddings.ModelInfo is not { ModelInstanceCount: 1, ThreadsPerModel: 16, ConcurrentRequestsPerModel: 8, HealthyModelInstanceCount: 1 })
+    throw new InvalidOperationException("Default inference topology should be one healthy model instance, 16 threads, and 8 concurrent requests/model.");
 
 const string formatProbe = "A compact semantic embedding format probe.";
 var defaultDocument = await embeddings.EmbedDocumentAsync(formatProbe);
@@ -170,14 +168,14 @@ foreach (var testCase in cases)
     Console.WriteLine($"PASS {testCase.ExpectedTitle}: {results[0].Score:P1} - {testCase.Query}");
 }
 
-var burstSize = expectedConcurrency + 3;
+var burstSize = 11;
 var concurrentTasks = Enumerable.Range(0, burstSize)
     .Select(i => embeddings.EmbedQueryAsync($"Concurrent embedding request {i}: PostgreSQL backup restore"))
     .ToArray();
 var concurrentResults = await Task.WhenAll(concurrentTasks);
 if (concurrentResults.Length != burstSize || concurrentResults.Any(result => result.Vector.Dimensions != 2048))
     throw new InvalidOperationException("Concurrent inference/queueing smoke test failed.");
-Console.WriteLine($"PASS burst of {burstSize} requests through {expectedConcurrency} concurrent slot(s) on one ONNX model instance.");
+Console.WriteLine("PASS burst of 11 requests through 8 concurrent slots on one ONNX model instance.");
 
 await host.StopAsync();
 

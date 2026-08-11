@@ -6,51 +6,40 @@ The package is CPU-first and optimized around small local embedding models.
 
 A single ONNX Runtime session can execute multiple inference requests concurrently. The package therefore separates request concurrency from model replication.
 
-Default topology:
+Defaults:
 
 ```text
 ModelInstanceCount             1
 ThreadsPerModel               16
-ConcurrentRequestsPerModel    Auto
+ConcurrentRequestsPerModel    Auto → 8
 ```
-
-At 16 threads/model, automatic concurrency resolves to:
-
-```text
-Jasper INT8    5
-Jasper INT4    4
-Jasper FP32    4
-custom model   4
-```
-
-These are benchmark-derived default caps, not ONNX Runtime hard limits.
 
 ## Automatic concurrency
 
-Automatic mode starts from approximately half the configured model thread count, minimum one, then applies the selected model profile cap:
+When concurrency is left at zero, it resolves to half the model's thread count with a cap of eight and a minimum of one:
 
 ```text
-min(max(ThreadsPerModel / 2, 1), profileCap)
+max(1, min(ThreadsPerModel / 2, 8))
 ```
 
-For the global/custom profile, 4 threads resolves to 2 requests and 8 or more threads reaches the cap of 4. Jasper INT8 has a separate cap of 5 because benchmarking showed that fifth concurrent request still provided useful aggregate throughput, while the deal degraded materially beyond it.
+This gives 2 concurrent requests at 4 threads, 4 at 8 threads, 6 at 12 threads, and 8 at 16 or more threads.
 
-Explicit positive `ConcurrentRequestsPerModel` values remain allowed and are not silently clamped. Benchmark your own CPU/model combination before overriding the defaults.
+Explicit values are allowed above eight; the automatic cap is simply the package's conservative default boundary.
 
 ## Multiple model instances
 
-`ModelInstanceCount > 1` creates additional independent ONNX sessions/model copies. This increases memory substantially but can increase aggregate throughput after a single session reaches its practical scaling point.
+`ModelInstanceCount > 1` creates additional independent ONNX sessions/model copies. It is supported, load-balanced, and self-healing—but it is **not expected to increase throughput in the normal case**.
 
-Multiple instances use explicit least-loaded routing:
+The common CPU bottleneck after a session is sufficiently busy is shared platform throughput: memory bandwidth, caches, memory controllers/interconnects, or another part of the CPU-to-RAM path. Adding another full model copy can therefore consume substantially more RAM while competing for the same limiting resource.
+
+Use multiple model instances for experimental benchmarking, unusual CPU/NUMA/memory layouts, or machines where measurements prove a benefit. A future/experimental optimization could isolate model sessions by CPU topology (for example NUMA nodes, CPU groups, or AMD CCD-related layouts), bind their threads, and preserve memory locality so they interfere less with one another. Whether that works is hardware-specific and should be measured rather than assumed.
+
+When multiple copies are enabled, least-loaded routing makes the best use of the capacity you chose to provision:
 
 ```text
-A 3/5
-B 2/5  ← next request
+A 3/8
+B 2/8  ← next request
 ```
-
-When equally loaded, routing rotates between instances. This means two idle instances and two new requests are intentionally spread one request to each rather than filling the first instance.
-
-A failed instance is removed from rotation while it drains and rebuilds; healthy instances continue receiving traffic. See [concurrency.md](concurrency.md).
 
 ## Token limits
 
@@ -91,4 +80,4 @@ Search over a precomputed `QueryEmbedding` performs no ONNX inference. For large
 
 ## Measure your machine
 
-CPU architecture, core count, memory bandwidth, model precision, thread budgets, and request concurrency materially affect throughput. Treat the built-in profiles as strong starting points and benchmark before adding model instances or overriding concurrency.
+CPU architecture, core count, memory bandwidth, model precision, thread budgets, and request concurrency materially affect throughput. Treat the defaults as a strong starting point and benchmark before adding model instances or overriding concurrency.
