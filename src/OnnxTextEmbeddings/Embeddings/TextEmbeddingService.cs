@@ -34,6 +34,7 @@ public interface ITextEmbeddingService : IAsyncDisposable
     Task WaitUntilReadyAsync(CancellationToken cancellationToken = default);
     Task<bool> UpdateModelAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TextEmbedding>> EmbedAsync(string text, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(string text, CancellationToken cancellationToken = default);
     Task<QueryEmbedding> EmbedQueryAsync(string query, CancellationToken cancellationToken = default);
 }
 
@@ -99,9 +100,6 @@ internal sealed class TextEmbeddingService(
                 candidateWorkers = new InferenceWorkerPool(candidate.Snapshot.ModelPath, options.Inference);
                 var candidateChunker = new StructuredTextChunker(candidateTokenizer, options);
 
-                // The candidate has now proven that both its tokenizer and ONNX runtime can load.
-                // Update the cache pointer before exposing the new runtime, but do not delete the old
-                // snapshot until its sessions have been disposed (important on Windows).
                 await modelCache.PromoteAsync(candidate, cancellationToken).ConfigureAwait(false);
 
                 var previousWorkers = _workers;
@@ -187,6 +185,11 @@ internal sealed class TextEmbeddingService(
             _initializationLock.Release();
         }
     }
+
+    public Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
+        string text,
+        CancellationToken cancellationToken = default) =>
+        EmbedAsync(text, cancellationToken);
 
     public async Task<IReadOnlyList<TextEmbedding>> EmbedAsync(string text, CancellationToken cancellationToken = default)
     {
