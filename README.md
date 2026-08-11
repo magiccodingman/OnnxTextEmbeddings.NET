@@ -123,6 +123,18 @@ The default is Jasper INT8:
 
 Model precision and returned-vector precision are independent.
 
+### Why Jasper?
+
+Jasper Token Compression 600M was chosen because its dynamic token-compression architecture is an unusually good fit for CPU document embedding: measured latency stays remarkably flat as context grows, while the final Dynamic INT8 export remains small and very close to FP32 quality.
+
+| Dynamic INT8 | 32 tokens | 512 tokens | 1024 tokens |
+|---|---:|---:|---:|
+| Latency | 44.4 ms | 63.2 ms | **84.6 ms** |
+| Throughput | 721 tok/s | 8,104 tok/s | **12,101 tok/s** |
+| Speed vs FP32 | 3.14× | 3.35× | **3.41×** |
+
+The project intentionally defaults to **1024 tokens**: local quality testing found Jasper extremely strong through roughly 756 tokens and only slightly degraded around 1024, but with a much sharper long-tail falloff beyond 1024—consistent with the upstream model having been distilled only through 1024 tokens. See [Why Jasper is the default model](docs/jasper-model.md) for the complete CPU, memory, concurrency, fidelity, and length-quality results.
+
 ## Vector formats: FP32 by default, INT8 recommended for compact storage
 
 Both document and query embeddings return **FP32 by default** for maximum compatibility.
@@ -247,6 +259,7 @@ The core package owns no database. Store `TextEmbedding` or `SingleEmbedding` re
 - [Getting started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [Why Jasper is the default model](docs/jasper-model.md)
 - [Concurrency, load balancing, and recovery](docs/concurrency.md)
 - [Vector formats and conversion](docs/vector-formats.md)
 - [Single-embedding aggregation](docs/single-embedding.md)
