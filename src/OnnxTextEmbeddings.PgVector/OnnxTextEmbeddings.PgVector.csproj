@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageId>OnnxTextEmbeddings.NET.PgVector</PackageId>
+    <Description>pgvector integration helpers for OnnxTextEmbeddings.NET.</Description>
+    <PackageTags>onnx;embeddings;semantic-search;pgvector;postgresql</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
+    <PackageReference Include="Pgvector" />
+    <PackageReference Include="Pgvector.EntityFrameworkCore" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>

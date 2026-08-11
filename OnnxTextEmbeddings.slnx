@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
+    <Project Path="src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OnnxTextEmbeddings.Tests/OnnxTextEmbeddings.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/OnnxTextEmbeddings.Sample.Console/OnnxTextEmbeddings.Sample.Console.csproj" />
+  </Folder>
+</Solution>
