@@ -380,7 +380,9 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
     private void StartExecution(ModelInstance instance, WorkItem work)
     {
         var id = Interlocked.Increment(ref _nextWorkId);
-        var task = ExecuteWorkAsync(instance, work);
+        // session.Run() is synchronous/native work. Launch it independently so the central scheduler can immediately
+        // continue routing queued items instead of being serialized behind the first inference it dispatches.
+        var task = Task.Run(() => ExecuteWorkAsync(instance, work));
         _inflight[id] = task;
         _ = ObserveCompletionAsync(id, task);
     }
