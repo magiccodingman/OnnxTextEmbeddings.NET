@@ -207,7 +207,7 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
     private readonly string _modelPath;
     private readonly ILogger? _logger;
     private readonly object _gate = new();
-    private readonly SemaphoreSlim _capacitySignal = new(0);
+    private readonly SemaphoreSlim _capacitySignal = new(0, 1);
     private readonly ConcurrentDictionary<long, Task> _inflight = new();
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _scheduler;
@@ -467,7 +467,7 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
 
         drained?.TrySetResult(true);
         if (signalCapacity)
-            _capacitySignal.Release();
+            SignalCapacityChanged();
     }
 
     private void BeginRecovery(ModelInstance instance, Exception exception, bool memoryPressure)
@@ -565,7 +565,7 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
                     "Model instance {ModelInstance} recovered successfully as generation {Generation}.",
                     instance.Index,
                     instance.Generation);
-                _capacitySignal.Release();
+                SignalCapacityChanged();
                 return;
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
@@ -580,6 +580,18 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
                     instance.Index,
                     attempt);
             }
+        }
+    }
+
+    private void SignalCapacityChanged()
+    {
+        try
+        {
+            _capacitySignal.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // Wakeups are coalesced. The scheduler re-checks all model-instance state after any signal.
         }
     }
 
