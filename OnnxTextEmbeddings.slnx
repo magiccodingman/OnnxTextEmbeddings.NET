@@ -5,6 +5,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/OnnxTextEmbeddings.Tests/OnnxTextEmbeddings.Tests.csproj" />
+    <Project Path="tests/OnnxTextEmbeddings.PostgresIntegration/OnnxTextEmbeddings.PostgresIntegration.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/OnnxTextEmbeddings.Sample.Console/OnnxTextEmbeddings.Sample.Console.csproj" />
