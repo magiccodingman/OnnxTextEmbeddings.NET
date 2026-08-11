@@ -63,6 +63,33 @@ public static class EmbeddingSerializer
         }
     }
 
+    public static string SerializeJson(SingleEmbedding embedding, bool indented = false)
+    {
+        ArgumentNullException.ThrowIfNull(embedding);
+        return JsonSerializer.Serialize(embedding, new JsonSerializerOptions(JsonOptions) { WriteIndented = indented });
+    }
+
+    public static SingleEmbedding DeserializeSingleJson(string json)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(json);
+        try
+        {
+            var value = JsonSerializer.Deserialize<SingleEmbedding>(json, JsonOptions) ??
+                throw new EmbeddingSerializationException("Single-embedding JSON contained no record.");
+            EnsureSchema(value.SchemaVersion);
+            _ = value.Vector.ToFloat32();
+            return value;
+        }
+        catch (EmbeddingSerializationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+            throw new EmbeddingSerializationException("Unable to deserialize the single-embedding record.", ex);
+        }
+    }
+
     public static byte[] SerializeVector(EmbeddingVector vector)
     {
         ArgumentNullException.ThrowIfNull(vector);
