@@ -26,11 +26,20 @@ public sealed class EmbeddingSerializerTests
         var embedding = TestEmbedding();
         var json = EmbeddingSerializer.SerializeJson(embedding);
         var restored = EmbeddingSerializer.DeserializeJson(json);
+
         Assert.Equal(EmbeddingProtocol.SchemaVersion, restored.SchemaVersion);
         Assert.Equal(embedding.Identity, restored.Identity);
         Assert.Equal(embedding.Source, restored.Source);
-        Assert.Equal(embedding.Chunk, restored.Chunk);
+        Assert.Equal(embedding.Chunk.Index, restored.Chunk.Index);
+        Assert.Equal(embedding.Chunk.Count, restored.Chunk.Count);
+        Assert.Equal(embedding.Chunk.BoundaryKind, restored.Chunk.BoundaryKind);
+        Assert.Equal(embedding.Chunk.HeadingPath, restored.Chunk.HeadingPath);
+        Assert.Equal(embedding.Chunk.ContextTokenCount, restored.Chunk.ContextTokenCount);
+        Assert.Equal(embedding.Chunk.ModelPrefixTokenCount, restored.Chunk.ModelPrefixTokenCount);
+        Assert.Equal(embedding.Chunk.SpecialTokenCount, restored.Chunk.SpecialTokenCount);
+        Assert.Equal(embedding.Chunk.InputTokenCount, restored.Chunk.InputTokenCount);
         Assert.Equal(embedding.Text, restored.Text);
+        Assert.Equal(embedding.Context, restored.Context);
     }
 
     [Fact]
