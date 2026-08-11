@@ -33,6 +33,22 @@ public sealed class StructuredTextChunkerTests
     }
 
     [Fact]
+    public void ConfiguredOverlap_ReusesPriorTokensWithoutExceedingLimit()
+    {
+        using var tokenizer = new WhitespaceTokenizer();
+        var options = new OnnxTextEmbeddingsOptions();
+        options.Chunking.ChunkOverlapTokens = 2;
+        var chunker = new StructuredTextChunker(tokenizer, options);
+        var text = "# Backups\n\none two three four five six seven eight nine ten eleven twelve thirteen fourteen";
+
+        var chunks = chunker.Chunk(text, 8);
+
+        Assert.True(chunks.Count > 1);
+        Assert.True(chunks[1].TokenRange.Start < chunks[0].TokenRange.End);
+        Assert.All(chunks, x => Assert.True(x.ModelInput.TokenCount <= 8));
+    }
+
+    [Fact]
     public void CodeFenceHeading_IsNotTreatedAsMarkdownHeading()
     {
         using var tokenizer = new WhitespaceTokenizer();
