@@ -1,6 +1,6 @@
 # Configuration
 
-Configure the singleton during registration:
+Configure application-wide defaults during registration:
 
 ```csharp
 builder.Services.AddOnnxTextEmbeddings(options =>
@@ -10,21 +10,48 @@ builder.Services.AddOnnxTextEmbeddings(options =>
 
     options.Inference.ModelInstanceCount = 1;
     options.Inference.ThreadsPerModel = 16;
-    options.Inference.ConcurrentRequestsPerModel = 0; // auto: 8 at 16 threads
+    options.Inference.ConcurrentRequestsPerModel = 0; // automatic
     options.Inference.QueueCapacity = 256;
 
     options.Chunking.ChunkOverlapTokens = 0;
     options.Chunking.RepeatHeadingContext = true;
 
-    // Float32 is the interoperability-first default. INT8 is recommended for compact storage.
     options.Vectors.DocumentFormat = EmbeddingVectorFormat.Float32;
     options.Vectors.QueryFormat = EmbeddingVectorFormat.Float32;
 });
 ```
 
-## Token ceilings
+## Application defaults vs per-call overrides
 
-`DocumentChunkMaxTokens` controls each finalized document chunk input. `QueryMaxTokens` controls the single query vector. Both default to 1024 and remain **per-request limits**, regardless of how many requests execute concurrently.
+`DocumentChunkMaxTokens`, `QueryMaxTokens`, and the vector formats are defaults. Individual calls can override them without creating a second service registration.
+
+```csharp
+var chunks = await embeddingService.EmbedDocumentAsync(
+    text,
+    new EmbeddingRequestOptions
+    {
+        MaxTokens = 512,
+        VectorFormat = EmbeddingVectorFormat.Int8
+    });
+```
+
+For documents, `MaxTokens` changes the chunk/model-input ceiling for that request. It must be positive and cannot exceed the loaded model's hard token limit.
+
+Queries remain one embedding:
+
+```csharp
+var request = new QueryEmbeddingRequestOptions
+{
+    MaxTokens = 2048,
+    VectorFormat = EmbeddingVectorFormat.Float16
+};
+
+var count = await embeddingService.CountQueryTokensAsync(queryText, request);
+if (count.Fits)
+    query = await embeddingService.EmbedQueryAsync(queryText, request);
+```
+
+A query override changes only its acceptance ceiling; it never enables query chunking or silent truncation. `FitsModelLimit` still protects the model's actual hard maximum.
 
 ## Token counting without limit exceptions
 
@@ -33,29 +60,34 @@ int sourceTokens = await embeddingService.CountTokensAsync(text);
 QueryTokenCount count = await embeddingService.CountQueryTokensAsync(text);
 ```
 
-`CountTokensAsync` returns the source tokenizer count. `CountQueryTokensAsync` additionally evaluates the final model input and returns `InputTokenCount`, `QueryMaxTokens`, `ModelMaxTokens`, `FitsConfiguredLimit`, `FitsModelLimit`, and `Fits`. Counting an oversized query does not throw merely because it exceeds the configured maximum.
-
-`EmbedQueryAsync` intentionally continues to throw `QueryTokenLimitExceededException` when `Fits` would be false.
+`CountTokensAsync` returns source tokens. `CountQueryTokensAsync` evaluates final model-input tokens and returns the configured/request limit plus the model hard limit. Counting an oversized query reports `Fits = false` without throwing merely because the text is too long.
 
 ## Model instances, threads, and concurrency
 
-`ModelInstanceCount` controls independent ONNX sessions/model copies. The default is one.
+`ModelInstanceCount` controls independent ONNX sessions/model copies. Default: one.
 
-`ThreadsPerModel` controls ONNX Runtime intra-op threads for each model instance. The default is 16. Set it to zero only when hardware-based automatic resolution is desired; `MaximumAutoThreadsPerModel` bounds that automatic value.
+`ThreadsPerModel` controls ONNX Runtime intra-op threads for each model instance. Default: 16.
 
-`ConcurrentRequestsPerModel = 0` means automatic:
+`ConcurrentRequestsPerModel = 0` means automatic. At 16 threads:
 
 ```text
-min(ThreadsPerModel / 2, 8), minimum 1
+Jasper INT8 → 5
+Jasper INT4 → 4
+Jasper FP32 → 4
+custom model → 4
 ```
 
-With defaults, one model instance services up to eight concurrent inference calls. Explicit positive concurrency values are honored, though 8 is the recommended practical maximum.
+For lower thread counts, automatic concurrency remains approximately `ThreadsPerModel / 2` until it reaches the model profile cap. Explicit positive values are not silently capped.
+
+`UseJasper(JasperModelPrecision.Int8)` carries the built-in INT8 tuning profile. Calling `UseHuggingFace`, `UseLocalDirectory`, or `UseHttpManifest` selects the global/custom-model profile instead of guessing from a repository filename.
 
 See [concurrency.md](concurrency.md).
 
 ## Queue capacity
 
-Embedding work enters a bounded channel. A finite queue provides backpressure rather than allowing an unbounded burst of strings to become unbounded memory growth.
+Embedding work enters one bounded global queue. The scheduler dispatches only to healthy model instances with free capacity and uses least-active routing across multiple instances.
+
+If every instance is recovering, queued work waits. Once the queue is full, producers asynchronously wait for queue capacity.
 
 ## Chunking
 
@@ -63,17 +95,23 @@ Overlap defaults to zero. If enabled, continuation chunks reuse up to the config
 
 ## Vector formats
 
-Both document and query return formats default to FP32 for maximum interoperability. Applications that persist many vectors should strongly consider INT8 for its roughly 4x smaller vector payload.
+Both document and query return formats default to FP32 for maximum interoperability. Applications persisting many vectors should consider INT8 for its roughly 4x smaller payload.
 
-The configured values are only defaults. Any embedding call can select a format dynamically:
+Per-call request options can combine vector and token overrides:
 
 ```csharp
-var compact = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Int8);
-var tiny = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Int4);
-var full = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Float32);
+var compact = await embeddingService.EmbedDocumentAsync(
+    text,
+    new EmbeddingRequestOptions
+    {
+        MaxTokens = 768,
+        VectorFormat = EmbeddingVectorFormat.Int8
+    });
 ```
 
-See [vector-formats.md](vector-formats.md).
+## Runtime health
+
+`ITextEmbeddingService.ModelInfo` includes aggregate health plus `Instances`, a point-in-time snapshot containing health state, active/max requests, generation, total recoveries, current recovery attempt, and last failure text.
 
 ## Search
 

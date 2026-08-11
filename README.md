@@ -12,7 +12,7 @@ OnnxTextEmbeddings.NET is aimed at wikis, documentation, note apps, games, local
 dotnet add package OnnxTextEmbeddings.NET
 ```
 
-Optional PostgreSQL/pgvector helpers live in a separate package so core users do not inherit PostgreSQL dependencies:
+Optional PostgreSQL/pgvector helpers live in a separate package:
 
 ```bash
 dotnet add package OnnxTextEmbeddings.NET.PgVector
@@ -42,29 +42,83 @@ var results = await semanticSearch.SearchAsync(
     new SemanticSearchRequest { Top = 10 });
 ```
 
-## Queries and token counting
+## Per-call token and vector overrides
 
-Queries deliberately produce **one embedding vector**. They are never silently truncated or chunked.
-
-```csharp
-QueryEmbedding query = await embeddingService.EmbedQueryAsync("postgres backup restore");
-```
-
-If the final query input exceeds `QueryMaxTokens`, `EmbedQueryAsync` throws `QueryTokenLimitExceededException`. Applications that want to validate first can count without triggering that limit error:
+The application-wide values are defaults, not permanent restrictions.
 
 ```csharp
-var queryCount = await embeddingService.CountQueryTokensAsync(userText);
-if (queryCount.Fits)
-    query = await embeddingService.EmbedQueryAsync(userText);
+var compactChunks = await embeddingService.EmbedDocumentAsync(
+    text,
+    new EmbeddingRequestOptions
+    {
+        MaxTokens = 512,
+        VectorFormat = EmbeddingVectorFormat.Int8
+    });
 ```
 
-## Concurrent CPU inference without duplicate model copies
+`MaxTokens` changes the actual document chunk/model-input ceiling for that call. It still cannot exceed the loaded model's hard maximum.
 
-Defaults keep **one model copy in memory**, use 16 threads, and allow up to 8 simultaneous inference calls against that one ONNX session. See [Concurrency and threading](docs/concurrency.md).
+Queries remain exactly one vector and are never chunked. A caller may raise or lower that request's acceptance ceiling independently of the global `QueryMaxTokens`:
+
+```csharp
+var query = await embeddingService.EmbedQueryAsync(
+    queryText,
+    new QueryEmbeddingRequestOptions
+    {
+        MaxTokens = 2048,
+        VectorFormat = EmbeddingVectorFormat.Float32
+    });
+```
+
+The matching non-throwing validation API accepts the same request options:
+
+```csharp
+var count = await embeddingService.CountQueryTokensAsync(
+    queryText,
+    new QueryEmbeddingRequestOptions { MaxTokens = 2048 });
+
+if (count.Fits)
+    query = await embeddingService.EmbedQueryAsync(
+        queryText,
+        new QueryEmbeddingRequestOptions { MaxTokens = 2048 });
+```
+
+## CPU concurrency and multiple model instances
+
+One ONNX `InferenceSession` can execute several `Run()` calls concurrently, so normal concurrency does **not** require duplicate model weights in memory.
+
+Default model topology:
+
+```text
+ModelInstanceCount = 1
+ThreadsPerModel = 16
+ConcurrentRequestsPerModel = Auto
+```
+
+Automatic concurrency uses `ThreadsPerModel / 2` and then applies a benchmark-derived model profile:
+
+- built-in Jasper INT8: cap **5** concurrent requests/model
+- Jasper INT4: global cap **4**
+- Jasper FP32: global cap **4**
+- custom models: global cap **4**
+
+Explicit positive `ConcurrentRequestsPerModel` values always win.
+
+If multiple model instances are deliberately loaded, work is routed to the **healthy instance with the fewest active requests**, with rotating tie-breaking. Two idle model instances receiving two requests therefore receive one request each rather than filling one model first.
+
+## Self-healing model instances
+
+Each model copy has independent health and capacity tracking. A recoverable ONNX session/runtime failure removes that instance from routing, lets its active calls drain, disposes the old session, creates a fresh session generation, and returns the instance to service only after the replacement loads successfully.
+
+If another instance is healthy, traffic continues there at reduced capacity. If every instance is unavailable, the bounded global queue waits for recovery instead of inventing capacity or permanently losing a request slot.
+
+Memory-pressure failures rebuild the affected instance but are not immediately retried on another model copy, avoiding a cascading OOM. This recovery exists **inside a live process**; if the operating system or container runtime kills the entire .NET process for OOM, process/service-level restart is still required.
+
+See [Concurrency, load balancing, and recovery](docs/concurrency.md).
 
 ## Default model
 
-The default is the CPU-friendly Jasper dynamic INT8 ONNX model:
+The default is Jasper INT8:
 
 - `magiccodingman/Jasper-Token-Compression-600M-ONNX-INT8`
 - `magiccodingman/Jasper-Token-Compression-600M-ONNX-INT4`
@@ -74,9 +128,7 @@ Model precision and returned-vector precision are independent.
 
 ## Vector formats: FP32 by default, INT8 recommended for compact storage
 
-Both document and query embeddings now return **FP32 by default** for maximum compatibility with databases, vector libraries, and external integrations.
-
-Supported return/storage representations:
+Both document and query embeddings return **FP32 by default** for maximum compatibility.
 
 | Format | Approx. payload per 2048-d vector | Notes |
 |---|---:|---|
@@ -85,7 +137,7 @@ Supported return/storage representations:
 | FP16 | 4 KiB | Half precision |
 | FP32 | 8 KiB | Default; maximum interoperability |
 
-Make INT8 your application-wide document default when compact storage matters:
+Make INT8 the application-wide document default when compact storage matters:
 
 ```csharp
 builder.Services.AddOnnxTextEmbeddings(options =>
@@ -94,23 +146,19 @@ builder.Services.AddOnnxTextEmbeddings(options =>
 });
 ```
 
-Or choose dynamically for a single call without changing the global default:
+Or choose dynamically:
 
 ```csharp
 var tiny = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Int4);
 var compact = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Int8);
 var half = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Float16);
 var full = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Float32);
-
-var compactQuery = await embeddingService.EmbedQueryAsync(queryText, EmbeddingVectorFormat.Int8);
 ```
-
-Per-call selection is applied directly to the original FP32 ONNX result, so requesting FP32 never reconstructs an already-quantized default.
 
 ### Convert vectors you already have
 
 ```csharp
-EmbeddingVector fp32 = EmbeddingVector.FromFloat32(values); // preserves FP32
+EmbeddingVector fp32 = EmbeddingVector.FromFloat32(values);
 EmbeddingVector fp16 = EmbeddingVector.FromFloat32(values, EmbeddingVectorFormat.Float16);
 EmbeddingVector int8 = EmbeddingVector.FromFloat32(values, EmbeddingVectorFormat.Int8);
 EmbeddingVector int4 = EmbeddingVector.FromFloat32(values, EmbeddingVectorFormat.Int4);
@@ -118,23 +166,7 @@ EmbeddingVector int4 = EmbeddingVector.FromFloat32(values, EmbeddingVectorFormat
 EmbeddingVector smaller = fp32.ConvertTo(EmbeddingVectorFormat.Int8);
 ```
 
-A lower-precision vector can be dequantized into an FP32 representation for compatibility, but doing so cannot restore fidelity that was already discarded during quantization.
-
-See [Vector formats and conversion](docs/vector-formats.md).
-
-## Weighted semantic fields
-
-```csharp
-var results = await semanticSearch.SearchFieldsAsync(
-    query,
-    pages,
-    page =>
-    [
-        SemanticField.Create("title", page.TitleEmbeddings, 1.4f),
-        SemanticField.Create("tags", page.TagEmbeddings, 1.2f),
-        SemanticField.Create("content", page.ContentEmbeddings, 1.0f)
-    ]);
-```
+Expanding a lower-precision vector back to FP32 changes its representation; it cannot restore fidelity already discarded by quantization.
 
 ## Configuration defaults
 
@@ -144,7 +176,7 @@ DocumentChunkMaxTokens        1024
 QueryMaxTokens                1024
 ModelInstanceCount            1
 ThreadsPerModel               16
-ConcurrentRequestsPerModel    Auto (8 with default threads)
+ConcurrentRequestsPerModel    Auto (5 for Jasper INT8; 4 global/custom)
 QueueCapacity                 256
 ChunkOverlapTokens            0
 RepeatHeadingContext          true
@@ -153,11 +185,9 @@ Query vector format           FP32
 Scoring profile               DefaultV1
 ```
 
-## Model cache and updates
+## Runtime diagnostics
 
-The first request (or hosted-service warmup) resolves the model, downloads runtime assets into a local cache, validates them, creates the tokenizer and ONNX runtime, and atomically activates the snapshot.
-
-Updates are transactional. A failed candidate does not replace a working runtime. When a successful update is activated, old sessions are disposed before old snapshot files are removed.
+`ITextEmbeddingService.ModelInfo` reports current model-instance health, active request counts, generation numbers, recovery counts, and the aggregate number of healthy/recovering instances. This is useful for health endpoints and production diagnostics without requiring a monitoring framework.
 
 ## Persistence
 
@@ -168,7 +198,7 @@ The core package owns no database. Store `TextEmbedding` records wherever the ap
 - [Getting started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
-- [Concurrency and threading](docs/concurrency.md)
+- [Concurrency, load balancing, and recovery](docs/concurrency.md)
 - [Vector formats and conversion](docs/vector-formats.md)
 - [Model sources](docs/model-sources.md)
 - [HTTP model manifest](docs/model-manifest.md)
