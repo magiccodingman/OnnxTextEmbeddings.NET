@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - release
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore OnnxTextEmbeddings.slnx
+
+      - name: Build
+        run: dotnet build OnnxTextEmbeddings.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/OnnxTextEmbeddings.Tests/OnnxTextEmbeddings.Tests.csproj --configuration Release --no-build
+
+      - name: Pack smoke test
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          dotnet pack src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj --configuration Release --no-build --output artifacts
+          dotnet pack src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj --configuration Release --no-build --output artifacts

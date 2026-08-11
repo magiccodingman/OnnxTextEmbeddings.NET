@@ -1,0 +1,45 @@
+name: PostgreSQL integration
+
+on:
+  push:
+    branches-ignore:
+      - release
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pgvector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: embeddings
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d embeddings"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_CONNECTION_STRING: Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=embeddings
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run PostgreSQL integration
+        run: dotnet run --project tests/OnnxTextEmbeddings.PostgresIntegration/OnnxTextEmbeddings.PostgresIntegration.csproj --configuration Release
