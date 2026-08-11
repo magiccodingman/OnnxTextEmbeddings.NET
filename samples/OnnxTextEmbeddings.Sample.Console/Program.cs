@@ -63,6 +63,46 @@ if (smallChunks.Count <= defaultChunks.Count || smallChunks.Any(chunk => chunk.C
     throw new InvalidOperationException("Per-call document token-limit override did not control chunking as expected.");
 Console.WriteLine($"PASS per-call document chunk override: {defaultChunks.Count} default chunk(s) vs {smallChunks.Count} at 64 tokens.");
 
+var nativeAggregate = smallChunks.CombineToSingle();
+if (nativeAggregate.RepresentationKind != EmbeddingRepresentationKind.Aggregated ||
+    nativeAggregate.Vector.Dimensions != 2048 || nativeAggregate.Vector.Format != EmbeddingVectorFormat.Int8 ||
+    nativeAggregate.Aggregation.ProfileId != EmbeddingAggregationProfiles.SemanticCoverageV1 ||
+    nativeAggregate.SourceEmbeddingCount != smallChunks.Count || nativeAggregate.SourceTokenCount <= 0)
+    throw new InvalidOperationException("Native-dimensional SemanticCoverage aggregation returned unexpected metadata.");
+if (nativeAggregate.Aggregation.AggregationCoherence is < 0f or > 1f)
+    throw new InvalidOperationException("Aggregation coherence must remain normalized to 0..1.");
+
+foreach (var format in new[]
+         {
+             EmbeddingVectorFormat.Int4,
+             EmbeddingVectorFormat.Int8,
+             EmbeddingVectorFormat.Float16,
+             EmbeddingVectorFormat.Float32
+         })
+{
+    var aggregate = smallChunks.CombineToSingle(new SingleEmbeddingOptions { OutputFormat = format });
+    if (aggregate.Vector.Format != format || aggregate.Vector.Dimensions != 2048)
+        throw new InvalidOperationException($"Single-embedding output format override failed for {format}.");
+}
+
+var reducedAggregate = smallChunks.CombineToSingle(new SingleEmbeddingOptions
+{
+    OutputDimensions = 512,
+    OutputFormat = EmbeddingVectorFormat.Int8
+});
+if (reducedAggregate.Vector.Dimensions != 512 || reducedAggregate.Vector.Format != EmbeddingVectorFormat.Int8 ||
+    reducedAggregate.DimensionReduction?.ProfileId != EmbeddingDimensionReductionProfiles.SrhtV1)
+    throw new InvalidOperationException("2048 -> 512 SRHT-v1 aggregation reduction failed.");
+
+var aggregateQuery = await embeddings.EmbedQueryAsync("How do I restore a database backup?");
+var reducedAggregateQuery = aggregateQuery.ReduceDimensions(512, EmbeddingVectorFormat.Float32);
+if (reducedAggregateQuery.Identity.EmbeddingSpaceFingerprint != reducedAggregate.Identity.EmbeddingSpaceFingerprint)
+    throw new InvalidOperationException("Reduced query and document aggregate must enter the same SRHT-v1 embedding space.");
+var reducedSimilarity = EmbeddingVectorMath.CosineSimilarity(reducedAggregateQuery.Vector, reducedAggregate.Vector);
+if (!float.IsFinite(reducedSimilarity) || reducedSimilarity <= 0f)
+    throw new InvalidOperationException("Reduced query/aggregate cosine similarity should be finite and positive for matching backup content.");
+Console.WriteLine($"PASS SemanticCoverage-v1 aggregation and SRHT-v1 2048 -> 512 query compatibility ({reducedSimilarity:F3} cosine).");
+
 const string normalQuery = "How do I restore my PostgreSQL database backup?";
 var sourceTokenCount = await embeddings.CountTokensAsync(normalQuery);
 var queryTokenCount = await embeddings.CountQueryTokensAsync(normalQuery);
