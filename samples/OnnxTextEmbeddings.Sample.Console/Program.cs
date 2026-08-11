@@ -25,9 +25,11 @@ if (embeddings.ModelInfo?.Dimensions != 2048)
 
 var pages = new[]
 {
-    new Page("Backups", "# Backups\n\nRestore PostgreSQL from S3 by downloading the backup and applying it to the target database."),
-    new Page("Networking", "# Networking\n\nWireGuard peers exchange encrypted traffic over UDP."),
-    new Page("Cooking", "# Cooking\n\nRoast potatoes until crisp.")
+    new Page("Backups", "# Backups\n\nRestore PostgreSQL from S3 by downloading the database backup and applying it to the target database."),
+    new Page("Networking", "# Networking\n\nWireGuard peers create encrypted network tunnels and exchange protected traffic over UDP."),
+    new Page("Cooking", "# Cooking\n\nRoast potatoes in a hot oven until the outside is golden and crisp."),
+    new Page("Certificates", "# TLS Certificates\n\nRenew the HTTPS certificate before expiration and reload the web server so TLS clients receive the new certificate."),
+    new Page("Containers", "# Containers\n\nKubernetes schedules application containers into pods and keeps the requested replicas running across cluster nodes.")
 };
 
 var indexed = new List<IndexedPage>();
@@ -39,20 +41,36 @@ foreach (var page in pages)
     indexed.Add(new IndexedPage(page, vectors));
 }
 
-var query = await embeddings.EmbedQueryAsync("How do I restore my PostgreSQL backup?");
-var results = await search.SearchAsync(
-    query,
-    indexed,
-    x => x.Embeddings,
-    new SemanticSearchRequest { Top = 3 });
+var cases = new[]
+{
+    new SearchCase("How do I restore my PostgreSQL database backup?", "Backups"),
+    new SearchCase("What creates an encrypted UDP network tunnel?", "Networking"),
+    new SearchCase("How can I make roasted potatoes crispy?", "Cooking"),
+    new SearchCase("What should I renew when my HTTPS TLS certificate is expiring?", "Certificates"),
+    new SearchCase("What system schedules containers into pods across cluster nodes?", "Containers")
+};
 
-if (results.Count != 3 || results[0].Item.Page.Title != "Backups")
-    throw new InvalidOperationException("Jasper semantic-search smoke test did not rank the backup page first.");
+foreach (var testCase in cases)
+{
+    var query = await embeddings.EmbedQueryAsync(testCase.Query);
+    var results = await search.SearchAsync(
+        query,
+        indexed,
+        x => x.Embeddings,
+        new SemanticSearchRequest { Top = 3 });
 
-foreach (var result in results)
-    Console.WriteLine($"{result.Score:P1} - {result.Item.Page.Title}: {result.BestMatch.Embedding.Text}");
+    if (results.Count == 0 || results[0].Item.Page.Title != testCase.ExpectedTitle)
+    {
+        var actual = results.Count == 0 ? "<no result>" : results[0].Item.Page.Title;
+        throw new InvalidOperationException(
+            $"Jasper {precision} semantic-search smoke test expected '{testCase.ExpectedTitle}' first for '{testCase.Query}', but got '{actual}'.");
+    }
+
+    Console.WriteLine($"PASS {testCase.ExpectedTitle}: {results[0].Score:P1} - {testCase.Query}");
+}
 
 await host.StopAsync();
 
 sealed record Page(string Title, string Content);
 sealed record IndexedPage(Page Page, IReadOnlyList<TextEmbedding> Embeddings);
+sealed record SearchCase(string Query, string ExpectedTitle);
