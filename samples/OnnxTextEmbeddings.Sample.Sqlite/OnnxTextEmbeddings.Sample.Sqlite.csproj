@@ -6,6 +6,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 </Project>
