@@ -225,7 +225,11 @@ public sealed class SingleEmbeddingAggregationTests
         var restored = EmbeddingSerializer.DeserializeSingleJson(json);
 
         Assert.Equal(result.Identity, restored.Identity);
-        Assert.Equal(result.Vector, restored.Vector);
+        Assert.Equal(result.Vector.EncodingVersion, restored.Vector.EncodingVersion);
+        Assert.Equal(result.Vector.Format, restored.Vector.Format);
+        Assert.Equal(result.Vector.Dimensions, restored.Vector.Dimensions);
+        Assert.Equal(result.Vector.Data, restored.Vector.Data);
+        Assert.Equal(result.Vector.Quantization, restored.Vector.Quantization);
         Assert.Equal(result.Aggregation, restored.Aggregation);
         Assert.Equal(result.DimensionReduction, restored.DimensionReduction);
     }
