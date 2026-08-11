@@ -180,7 +180,10 @@ public sealed class ChunkingOptions
 
 public sealed class VectorOptions
 {
-    public EmbeddingVectorFormat DocumentFormat { get; set; } = EmbeddingVectorFormat.Int8;
+    /// <summary>Default vector format returned for document embeddings. Defaults to Float32 for maximum interoperability.</summary>
+    public EmbeddingVectorFormat DocumentFormat { get; set; } = EmbeddingVectorFormat.Float32;
+
+    /// <summary>Default vector format returned for query embeddings. Defaults to Float32.</summary>
     public EmbeddingVectorFormat QueryFormat { get; set; } = EmbeddingVectorFormat.Float32;
 }
 
