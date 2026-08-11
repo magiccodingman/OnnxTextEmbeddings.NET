@@ -2,14 +2,26 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using OnnxTextEmbeddings;
 
+var precisionName = Environment.GetEnvironmentVariable("JASPER_PRECISION") ?? "Int8";
+if (!Enum.TryParse<JasperModelPrecision>(precisionName, ignoreCase: true, out var precision))
+    throw new ArgumentException($"Unknown JASPER_PRECISION '{precisionName}'. Use Int8, Int4, or Float32.");
+
 var builder = Host.CreateApplicationBuilder(args);
-builder.Services.AddOnnxTextEmbeddings();
+builder.Services.AddOnnxTextEmbeddings(options => options.Model.UseJasper(precision));
 
 using var host = builder.Build();
 await host.StartAsync();
 
 var embeddings = host.Services.GetRequiredService<ITextEmbeddingService>();
 var search = host.Services.GetRequiredService<ISemanticSearch>();
+await embeddings.WaitUntilReadyAsync();
+
+Console.WriteLine($"Model: {embeddings.ModelInfo?.ModelId}");
+Console.WriteLine($"Revision: {embeddings.ModelInfo?.SourceRevision}");
+Console.WriteLine($"Dimensions: {embeddings.ModelInfo?.Dimensions}");
+
+if (embeddings.ModelInfo?.Dimensions != 2048)
+    throw new InvalidOperationException($"Expected Jasper to produce 2048 dimensions, got {embeddings.ModelInfo?.Dimensions}.");
 
 var pages = new[]
 {
@@ -20,13 +32,22 @@ var pages = new[]
 
 var indexed = new List<IndexedPage>();
 foreach (var page in pages)
-    indexed.Add(new IndexedPage(page, await embeddings.EmbedAsync(page.Content)));
+{
+    var vectors = await embeddings.EmbedDocumentAsync(page.Content);
+    if (vectors.Count == 0)
+        throw new InvalidOperationException($"No embedding was returned for {page.Title}.");
+    indexed.Add(new IndexedPage(page, vectors));
+}
 
+var query = await embeddings.EmbedQueryAsync("How do I restore my PostgreSQL backup?");
 var results = await search.SearchAsync(
-    "How do I restore my PostgreSQL backup?",
+    query,
     indexed,
     x => x.Embeddings,
     new SemanticSearchRequest { Top = 3 });
+
+if (results.Count != 3 || results[0].Item.Page.Title != "Backups")
+    throw new InvalidOperationException("Jasper semantic-search smoke test did not rank the backup page first.");
 
 foreach (var result in results)
     Console.WriteLine($"{result.Score:P1} - {result.Item.Page.Title}: {result.BestMatch.Embedding.Text}");
