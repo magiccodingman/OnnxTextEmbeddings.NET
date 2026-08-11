@@ -6,7 +6,7 @@ The default model is downloaded and ONNX Runtime is initialized on first use. Re
 
 ## `QueryTokenLimitExceededException`
 
-Queries are intentionally never silently truncated/chunked. Shorten the query or deliberately preprocess it in application code. `QueryMaxTokens` can be increased only up to the model's supported maximum.
+Queries are intentionally never silently truncated/chunked. Use `CountQueryTokensAsync` to inspect `InputTokenCount`, limits, and `Fits` before embedding when you want validation without exception-driven control flow.
 
 ## `EmbeddingSpaceMismatchException`
 
@@ -20,15 +20,15 @@ Set:
 options.Model.ModelFile = "model-int8.onnx";
 ```
 
-so selection is explicit.
-
 ## Download fails but old model exists
 
 During an update, the active runtime remains in service if the candidate fails. Inspect `ITextEmbeddingService.Status.LastError` and logs for the download/validation failure.
 
 ## Too much CPU contention
 
-Reduce `ThreadsPerWorker`, `MaximumAutoThreadsPerWorker`, or `WorkerCount`. Multiple workers each own an ONNX session, so `workers × threads` can oversubscribe a CPU quickly.
+Start by reducing `ConcurrentRequestsPerModel` or `ThreadsPerModel`. The default is 16 threads and automatic concurrency of 8. If multiple model instances were explicitly configured, reducing `ModelInstanceCount` also reduces CPU and model-memory pressure.
+
+Do not add model instances merely to gain ordinary request concurrency; one session already supports concurrent calls.
 
 ## Search looks wrong after a deployment
 

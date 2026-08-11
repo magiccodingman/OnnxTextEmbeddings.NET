@@ -19,9 +19,32 @@ await embeddings.WaitUntilReadyAsync();
 Console.WriteLine($"Model: {embeddings.ModelInfo?.ModelId}");
 Console.WriteLine($"Revision: {embeddings.ModelInfo?.SourceRevision}");
 Console.WriteLine($"Dimensions: {embeddings.ModelInfo?.Dimensions}");
+Console.WriteLine($"Instances: {embeddings.ModelInfo?.ModelInstanceCount}; Threads/model: {embeddings.ModelInfo?.ThreadsPerModel}; Concurrent/model: {embeddings.ModelInfo?.ConcurrentRequestsPerModel}");
 
 if (embeddings.ModelInfo?.Dimensions != 2048)
     throw new InvalidOperationException($"Expected Jasper to produce 2048 dimensions, got {embeddings.ModelInfo?.Dimensions}.");
+if (embeddings.ModelInfo is not { ModelInstanceCount: 1, ThreadsPerModel: 16, ConcurrentRequestsPerModel: 8 })
+    throw new InvalidOperationException("Default inference topology should be one model instance, 16 threads, and 8 concurrent requests per model.");
+
+const string normalQuery = "How do I restore my PostgreSQL database backup?";
+var sourceTokenCount = await embeddings.CountTokensAsync(normalQuery);
+var queryTokenCount = await embeddings.CountQueryTokensAsync(normalQuery);
+if (sourceTokenCount <= 0 || queryTokenCount.SourceTokenCount != sourceTokenCount || !queryTokenCount.Fits)
+    throw new InvalidOperationException("Token-count API returned unexpected values for a normal query.");
+
+var oversizedQuery = string.Join(' ', Enumerable.Repeat("database backup restoration procedure", 400));
+var oversizedCount = await embeddings.CountQueryTokensAsync(oversizedQuery);
+if (oversizedCount.Fits || oversizedCount.InputTokenCount <= oversizedCount.QueryMaxTokens)
+    throw new InvalidOperationException("Oversized query token counting should report Fits=false without throwing.");
+try
+{
+    _ = await embeddings.EmbedQueryAsync(oversizedQuery);
+    throw new InvalidOperationException("EmbedQueryAsync should reject an oversized query.");
+}
+catch (QueryTokenLimitExceededException)
+{
+    Console.WriteLine($"PASS oversized query count: {oversizedCount.InputTokenCount} > {oversizedCount.QueryMaxTokens}");
+}
 
 var pages = new[]
 {
@@ -43,7 +66,7 @@ foreach (var page in pages)
 
 var cases = new[]
 {
-    new SearchCase("How do I restore my PostgreSQL database backup?", "Backups"),
+    new SearchCase(normalQuery, "Backups"),
     new SearchCase("What creates an encrypted UDP network tunnel?", "Networking"),
     new SearchCase("How can I make roasted potatoes crispy?", "Cooking"),
     new SearchCase("What should I renew when my HTTPS TLS certificate is expiring?", "Certificates"),
@@ -53,11 +76,7 @@ var cases = new[]
 foreach (var testCase in cases)
 {
     var query = await embeddings.EmbedQueryAsync(testCase.Query);
-    var results = await search.SearchAsync(
-        query,
-        indexed,
-        x => x.Embeddings,
-        new SemanticSearchRequest { Top = 3 });
+    var results = await search.SearchAsync(query, indexed, x => x.Embeddings, new SemanticSearchRequest { Top = 3 });
 
     if (results.Count == 0 || results[0].Item.Page.Title != testCase.ExpectedTitle)
     {
@@ -65,9 +84,17 @@ foreach (var testCase in cases)
         throw new InvalidOperationException(
             $"Jasper {precision} semantic-search smoke test expected '{testCase.ExpectedTitle}' first for '{testCase.Query}', but got '{actual}'.");
     }
-
     Console.WriteLine($"PASS {testCase.ExpectedTitle}: {results[0].Score:P1} - {testCase.Query}");
 }
+
+// Prove the default topology can execute eight calls concurrently while keeping one model instance.
+var concurrentTasks = Enumerable.Range(0, 8)
+    .Select(i => embeddings.EmbedQueryAsync($"Concurrent embedding request {i}: PostgreSQL backup restore"))
+    .ToArray();
+var concurrentResults = await Task.WhenAll(concurrentTasks);
+if (concurrentResults.Length != 8 || concurrentResults.Any(result => result.Vector.Dimensions != 2048))
+    throw new InvalidOperationException("Shared-session concurrent inference smoke test failed.");
+Console.WriteLine("PASS 8 concurrent query embeddings on one ONNX model instance.");
 
 await host.StopAsync();
 

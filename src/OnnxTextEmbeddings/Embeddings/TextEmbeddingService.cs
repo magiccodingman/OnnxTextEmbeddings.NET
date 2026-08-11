@@ -20,7 +20,13 @@ public sealed record ModelRuntimeInfo(
     string EmbeddingSpaceFingerprint,
     int? ModelMaxTokens,
     int? Dimensions,
-    int WorkerCount);
+    int WorkerCount)
+{
+    public int ModelInstanceCount => WorkerCount;
+    public int ThreadsPerModel { get; init; }
+    public int ConcurrentRequestsPerModel { get; init; }
+    public int TotalConcurrentRequests => ModelInstanceCount * ConcurrentRequestsPerModel;
+}
 
 public sealed record EmbeddingServiceStatus(
     EmbeddingServiceState State,
@@ -33,6 +39,8 @@ public interface ITextEmbeddingService : IAsyncDisposable
     ModelRuntimeInfo? ModelInfo { get; }
     Task WaitUntilReadyAsync(CancellationToken cancellationToken = default);
     Task<bool> UpdateModelAsync(CancellationToken cancellationToken = default);
+    Task<int> CountTokensAsync(string text, CancellationToken cancellationToken = default);
+    Task<QueryTokenCount> CountQueryTokensAsync(string query, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TextEmbedding>> EmbedAsync(string text, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(string text, CancellationToken cancellationToken = default);
     Task<QueryEmbedding> EmbedQueryAsync(string query, CancellationToken cancellationToken = default);
@@ -117,7 +125,11 @@ internal sealed class TextEmbeddingService(
                     candidate.Snapshot.EmbeddingSpaceFingerprint,
                     candidate.Snapshot.ModelMaxTokens,
                     _workers.EmbeddingDimensions,
-                    options.Inference.WorkerCount);
+                    _workers.ModelInstanceCount)
+                {
+                    ThreadsPerModel = _workers.ThreadsPerModel,
+                    ConcurrentRequestsPerModel = _workers.ConcurrentRequestsPerModel
+                };
                 _status = new EmbeddingServiceStatus(EmbeddingServiceState.Ready);
 
                 if (previousWorkers is not null)
@@ -137,9 +149,12 @@ internal sealed class TextEmbeddingService(
                 }
 
                 logger.LogInformation(
-                    "ONNX text embedding service is ready with model {ModelId} ({Revision}).",
+                    "ONNX text embedding service is ready with model {ModelId} ({Revision}), {ModelInstances} model instance(s), {ThreadsPerModel} threads/model, and {ConcurrentRequestsPerModel} concurrent requests/model.",
                     candidate.Snapshot.ModelId,
-                    candidate.Snapshot.SourceRevision);
+                    candidate.Snapshot.SourceRevision,
+                    _workers.ModelInstanceCount,
+                    _workers.ThreadsPerModel,
+                    _workers.ConcurrentRequestsPerModel);
                 return candidate.RequiresPromotion || !hadWorkingRuntime;
             }
             catch (Exception ex)
@@ -155,14 +170,8 @@ internal sealed class TextEmbeddingService(
 
                 if (candidate is { RequiresPromotion: true })
                 {
-                    try
-                    {
-                        await modelCache.DiscardAsync(candidate, CancellationToken.None).ConfigureAwait(false);
-                    }
-                    catch (Exception cleanupError)
-                    {
-                        logger.LogWarning(cleanupError, "Unable to remove a failed model candidate snapshot.");
-                    }
+                    try { await modelCache.DiscardAsync(candidate, CancellationToken.None).ConfigureAwait(false); }
+                    catch (Exception cleanupError) { logger.LogWarning(cleanupError, "Unable to remove a failed model candidate snapshot."); }
                 }
 
                 if (hadWorkingRuntime)
@@ -174,9 +183,7 @@ internal sealed class TextEmbeddingService(
                     logger.LogWarning(ex, "Model update failed. The existing embedding runtime remains active.");
                 }
                 else
-                {
                     _status = new EmbeddingServiceStatus(EmbeddingServiceState.Faulted, ex.Message, ex);
-                }
                 throw;
             }
         }
@@ -186,10 +193,23 @@ internal sealed class TextEmbeddingService(
         }
     }
 
+    public async Task<int> CountTokensAsync(string text, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        await WaitUntilReadyAsync(cancellationToken).ConfigureAwait(false);
+        return _tokenizer!.CountSourceTokens(text);
+    }
+
+    public async Task<QueryTokenCount> CountQueryTokensAsync(string query, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        await WaitUntilReadyAsync(cancellationToken).ConfigureAwait(false);
+        return CreateQueryTokenCount(query, out _);
+    }
+
     public Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
         string text,
-        CancellationToken cancellationToken = default) =>
-        EmbedAsync(text, cancellationToken);
+        CancellationToken cancellationToken = default) => EmbedAsync(text, cancellationToken);
 
     public async Task<IReadOnlyList<TextEmbedding>> EmbedAsync(string text, CancellationToken cancellationToken = default)
     {
@@ -240,21 +260,25 @@ internal sealed class TextEmbeddingService(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         await WaitUntilReadyAsync(cancellationToken).ConfigureAwait(false);
-        var sourceTokens = _tokenizer!.CountSourceTokens(query);
-        var input = _tokenizer.EncodeModelInput(query);
-        if (input.TokenCount > options.QueryMaxTokens)
-            throw new QueryTokenLimitExceededException(sourceTokens, input.TokenCount, options.QueryMaxTokens, _snapshot!.ModelMaxTokens);
-        if (_snapshot!.ModelMaxTokens is { } hardLimit && input.TokenCount > hardLimit)
-            throw new QueryTokenLimitExceededException(sourceTokens, input.TokenCount, options.QueryMaxTokens, hardLimit);
+        var count = CreateQueryTokenCount(query, out var input);
+        if (!count.Fits)
+            throw new QueryTokenLimitExceededException(count.SourceTokenCount, count.InputTokenCount, count.QueryMaxTokens, count.ModelMaxTokens);
 
         var values = await _workers!.RunAsync(input, cancellationToken).ConfigureAwait(false);
         return new QueryEmbedding
         {
             Vector = EmbeddingVector.FromFloat32(values, options.Vectors.QueryFormat),
-            Identity = CreateIdentity(_snapshot),
-            SourceTokenCount = sourceTokens,
-            InputTokenCount = input.TokenCount
+            Identity = CreateIdentity(_snapshot!),
+            SourceTokenCount = count.SourceTokenCount,
+            InputTokenCount = count.InputTokenCount
         };
+    }
+
+    private QueryTokenCount CreateQueryTokenCount(string query, out TokenizedModelInput input)
+    {
+        var sourceTokens = _tokenizer!.CountSourceTokens(query);
+        input = _tokenizer.EncodeModelInput(query);
+        return new QueryTokenCount(sourceTokens, input.TokenCount, options.QueryMaxTokens, _snapshot!.ModelMaxTokens);
     }
 
     private static EmbeddingIdentity CreateIdentity(ModelSnapshot snapshot) => new()

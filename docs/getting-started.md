@@ -10,13 +10,11 @@ dotnet add package OnnxTextEmbeddings.NET
 builder.Services.AddOnnxTextEmbeddings();
 ```
 
-The default registration uses Jasper INT8 on CPU, one inference worker, 1024-token document chunks, a 1024-token query ceiling, INT8 document-vector storage, and FP32 query-vector storage.
+The default registration uses Jasper INT8 on CPU, **one model instance with 16 threads and up to 8 concurrent inference calls**, 1024-token document chunks, a 1024-token query ceiling, INT8 document-vector storage, and FP32 query-vector storage.
 
 ## 2. First model download
 
-The model is not bundled in the NuGet package. The first initialization resolves `magiccodingman/Jasper-Token-Compression-600M-ONNX-INT8` through the Hugging Face HTTP API, downloads the ONNX/tokenizer assets, creates a cache snapshot, and then loads ONNX Runtime.
-
-ASP.NET Core/Generic Host registrations include a warmup hosted service. By default warmup starts in the background; set `Initialization.BlockHostStartupUntilReady = true` when host startup must not complete until embeddings are ready.
+The model is not bundled in the NuGet package. The first initialization resolves `magiccodingman/Jasper-Token-Compression-600M-ONNX-INT8`, downloads the ONNX/tokenizer assets, creates a cache snapshot, and loads ONNX Runtime.
 
 ## 3. Embed a document
 
@@ -24,15 +22,31 @@ ASP.NET Core/Generic Host registrations include a warmup hosted service. By defa
 var embeddings = await embeddingService.EmbedDocumentAsync(markdown);
 ```
 
-`EmbedAsync` is the shorter equivalent. A short document yields one embedding. Larger documents yield several `TextEmbedding` records with exact UTF-16 source ranges, token ranges, chunk index/count, heading path, historical token capacity, model revision, and embedding-space fingerprint.
+A short document yields one embedding. Larger documents yield several `TextEmbedding` records with exact source ranges, token ranges, chunk index/count, heading path, historical token capacity, model revision, and embedding-space fingerprint.
 
-## 4. Embed a query
+## 4. Count and embed a query
+
+A query is always one vector. Check its token budget without exception-driven validation:
 
 ```csharp
-var query = await embeddingService.EmbedQueryAsync("how do backups work?");
+var count = await embeddingService.CountQueryTokensAsync(userQuery);
+
+if (!count.Fits)
+{
+    Console.WriteLine($"Query uses {count.InputTokenCount} of {count.QueryMaxTokens} configured tokens.");
+    return;
+}
+
+var query = await embeddingService.EmbedQueryAsync(userQuery);
 ```
 
-A query is always one vector. Oversized queries throw `QueryTokenLimitExceededException`; the library never silently truncates or chunks a semantic query.
+For a plain source count:
+
+```csharp
+int tokens = await embeddingService.CountTokensAsync(text);
+```
+
+`EmbedQueryAsync` still throws `QueryTokenLimitExceededException` if an oversized query is submitted directly; it never silently truncates or chunks it.
 
 ## 5. Search in memory
 
@@ -44,21 +58,20 @@ var results = await semanticSearch.SearchAsync(
     new SemanticSearchRequest { Top = 10 });
 ```
 
-No database integration is required. `SemanticSearchResult<T>` exposes final score, best chunk, per-field scores, raw cosine values, length confidence, and adjusted similarity.
+## 6. Tune concurrency only if needed
 
-## 6. Persist embeddings
-
-Store the complete `TextEmbedding`, not only raw vector bytes. The fingerprint and source metadata are intentionally part of the persistence contract. See [persistence.md](persistence.md).
-
-## Cache location
-
-Set an explicit cache directory when deployment needs a predictable path:
+Defaults already allow eight simultaneous inference calls against the one model instance:
 
 ```csharp
 builder.Services.AddOnnxTextEmbeddings(options =>
 {
-    options.Cache.Directory = Path.Combine(appData, "onnx-embeddings");
+    options.Inference.ThreadsPerModel = 16;
+    options.Inference.ConcurrentRequestsPerModel = 8; // explicit equivalent of default auto result
 });
 ```
 
-When unset, the package uses its platform-appropriate default cache root.
+See [concurrency.md](concurrency.md) before increasing `ModelInstanceCount`; an extra instance means an extra ONNX model/session in memory.
+
+## 7. Persist embeddings
+
+Store the complete `TextEmbedding`, not only raw vector bytes. The fingerprint and source metadata are intentionally part of the persistence contract.

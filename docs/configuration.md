@@ -7,10 +7,12 @@ builder.Services.AddOnnxTextEmbeddings(options =>
 {
     options.DocumentChunkMaxTokens = 1024;
     options.QueryMaxTokens = 1024;
-    options.Inference.WorkerCount = 1;
-    options.Inference.ThreadsPerWorker = 0; // auto
-    options.Inference.MaximumAutoThreadsPerWorker = 12;
+
+    options.Inference.ModelInstanceCount = 1;
+    options.Inference.ThreadsPerModel = 16;
+    options.Inference.ConcurrentRequestsPerModel = 0; // auto: 8 at 16 threads
     options.Inference.QueueCapacity = 256;
+
     options.Chunking.ChunkOverlapTokens = 0;
     options.Chunking.RepeatHeadingContext = true;
     options.Vectors.DocumentFormat = EmbeddingVectorFormat.Int8;
@@ -20,11 +22,34 @@ builder.Services.AddOnnxTextEmbeddings(options =>
 
 ## Token ceilings
 
-`DocumentChunkMaxTokens` controls finalized document model input. `QueryMaxTokens` controls the single query vector. Both are validated against a model maximum when the snapshot exposes one.
+`DocumentChunkMaxTokens` controls each finalized document chunk input. `QueryMaxTokens` controls the single query vector. Both default to 1024 and remain **per-request limits**, regardless of how many requests execute concurrently.
 
-## Workers and threads
+## Token counting without limit exceptions
 
-`WorkerCount` controls independent ONNX sessions. `ThreadsPerWorker = 0` means automatic. The automatic thread budget is capped by `MaximumAutoThreadsPerWorker`. Avoid multiplying workers and per-worker thread counts blindly: throughput can fall once sessions compete for the same physical cores.
+```csharp
+int sourceTokens = await embeddingService.CountTokensAsync(text);
+QueryTokenCount count = await embeddingService.CountQueryTokensAsync(text);
+```
+
+`CountTokensAsync` returns the source tokenizer count. `CountQueryTokensAsync` additionally evaluates the final model input and returns `InputTokenCount`, `QueryMaxTokens`, `ModelMaxTokens`, `FitsConfiguredLimit`, `FitsModelLimit`, and `Fits`. Counting an oversized query does not throw merely because it exceeds the configured maximum.
+
+`EmbedQueryAsync` intentionally continues to throw `QueryTokenLimitExceededException` when `Fits` would be false.
+
+## Model instances, threads, and concurrency
+
+`ModelInstanceCount` controls independent ONNX sessions/model copies. The default is one.
+
+`ThreadsPerModel` controls ONNX Runtime intra-op threads for each model instance. The default is 16. Set it to zero only when hardware-based automatic resolution is desired; `MaximumAutoThreadsPerModel` bounds that automatic value.
+
+`ConcurrentRequestsPerModel = 0` means automatic:
+
+```text
+min(ThreadsPerModel / 2, 8), minimum 1
+```
+
+With defaults, one model instance services up to eight concurrent inference calls. Explicit positive concurrency values are honored, though 8 is the recommended practical maximum.
+
+See [concurrency.md](concurrency.md).
 
 ## Queue capacity
 
@@ -32,11 +57,11 @@ Embedding work enters a bounded channel. A finite queue provides backpressure ra
 
 ## Chunking
 
-Overlap defaults to zero. If enabled, continuation chunks reuse up to the configured number of source tokens while reserving enough model-input capacity for that overlap. Markdown overlap stays inside the same structural section so text from one heading is not mislabeled as context for another.
+Overlap defaults to zero. If enabled, continuation chunks reuse up to the configured number of source tokens while reserving enough model-input capacity for that overlap.
 
 ## Vector formats
 
-Model precision and stored-vector format are independent. `EmbeddingVectorFormat.Int4` is packed symmetric per-vector quantization; INT8 is the default document representation. Queries default to FP32 because only one query vector is normally live at a time.
+Model precision and stored-vector format are independent. `EmbeddingVectorFormat.Int4` is packed symmetric per-vector quantization; INT8 is the default document representation. Queries default to FP32.
 
 ## Search
 
@@ -48,8 +73,6 @@ SupportWindow            = 0.12
 SecondSupportWeight      = 0.25
 ThirdSupportWeight       = 0.10
 ```
-
-See [semantic-scoring.md](semantic-scoring.md) for the formula.
 
 ## Initialization
 

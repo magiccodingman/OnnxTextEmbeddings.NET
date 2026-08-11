@@ -20,8 +20,6 @@ dotnet add package OnnxTextEmbeddings.NET.PgVector
 
 ## Five-minute start
 
-Register the defaults:
-
 ```csharp
 builder.Services.AddOnnxTextEmbeddings();
 ```
@@ -44,22 +42,58 @@ var results = await semanticSearch.SearchAsync(
     new SemanticSearchRequest { Top = 10 });
 ```
 
-The default search score is intentionally evidence-oriented: one highly relevant section can make a long document rank well; unrelated sections do not average the item downward; strong secondary matches provide only bounded support.
+## Queries and token counting
 
-## Queries and precomputed queries
-
-Queries are deliberately a **single embedding vector**. They are never silently truncated or chunked.
+Queries deliberately produce **one embedding vector**. They are never silently truncated or chunked.
 
 ```csharp
 QueryEmbedding query = await embeddingService.EmbedQueryAsync("postgres backup restore");
-
-var results = await semanticSearch.SearchAsync(
-    query,
-    pages,
-    page => page.Embeddings);
 ```
 
-If a query exceeds `QueryMaxTokens`, `QueryTokenLimitExceededException` is thrown so the application can make an explicit decision.
+If the final query input exceeds `QueryMaxTokens`, `EmbedQueryAsync` throws `QueryTokenLimitExceededException`. Applications that want to validate first can count without triggering that limit error:
+
+```csharp
+int sourceTokens = await embeddingService.CountTokensAsync(userText);
+QueryTokenCount queryCount = await embeddingService.CountQueryTokensAsync(userText);
+
+if (queryCount.Fits)
+{
+    var query = await embeddingService.EmbedQueryAsync(userText);
+}
+```
+
+`QueryTokenCount` reports source tokens, actual model-input tokens (including tokenizer-added special tokens), the configured query maximum, the model maximum when known, and `Fits`.
+
+## Concurrent CPU inference without duplicate model copies
+
+A single ONNX Runtime session can execute multiple `Run()` calls concurrently, so request concurrency does **not** require loading another copy of the model.
+
+Defaults:
+
+```text
+ModelInstanceCount             1
+ThreadsPerModel               16
+ConcurrentRequestsPerModel    Auto → min(ThreadsPerModel / 2, 8)
+Resolved default concurrency   8 requests
+QueueCapacity                256
+```
+
+So the normal configuration keeps **one Jasper model in memory** while allowing up to **8 inference requests in flight against that model instance**. Each request still has its own normal 1024-token default limit; concurrency does not combine or divide token budgets.
+
+Tune explicitly when desired:
+
+```csharp
+builder.Services.AddOnnxTextEmbeddings(options =>
+{
+    options.Inference.ModelInstanceCount = 1;
+    options.Inference.ThreadsPerModel = 16;
+    options.Inference.ConcurrentRequestsPerModel = 8;
+});
+```
+
+Automatic concurrency is capped at 8. Explicit positive values are honored, but **8 concurrent requests per model is the recommended practical maximum**; benchmarks showed little or no additional benefit beyond that point. Only increase `ModelInstanceCount` when you intentionally want another independent ONNX session/model copy in memory.
+
+See [Concurrency and threading](docs/concurrency.md).
 
 ## Default model
 
@@ -69,7 +103,7 @@ The default is the CPU-friendly Jasper dynamic INT8 ONNX model:
 - `magiccodingman/Jasper-Token-Compression-600M-ONNX-INT4`
 - `magiccodingman/Jasper-Token-Compression-600M-ONNX-FP32`
 
-Switch precision without changing the rest of the application:
+Switch model precision without changing the rest of the application:
 
 ```csharp
 builder.Services.AddOnnxTextEmbeddings(options =>
@@ -78,7 +112,7 @@ builder.Services.AddOnnxTextEmbeddings(options =>
 });
 ```
 
-Model precision and **stored-vector precision are independent**. You can run the INT8 model while storing packed INT4 vectors, or run FP32 while persisting INT8 vectors.
+Model precision and **stored-vector precision are independent**.
 
 ## Compact vector storage
 
@@ -103,8 +137,6 @@ Each persisted vector carries encoding version, dimensions, format, and quantiza
 
 ## Weighted semantic fields
 
-Applications often want title, tags, description, and body to contribute differently:
-
 ```csharp
 var results = await semanticSearch.SearchFieldsAsync(
     query,
@@ -120,27 +152,25 @@ var results = await semanticSearch.SearchFieldsAsync(
 ## Configuration defaults
 
 ```text
-Jasper model             INT8
-DocumentChunkMaxTokens   1024
-QueryMaxTokens           1024
-WorkerCount              1
-ThreadsPerWorker         Auto
-MaximumAutoThreads       12
-QueueCapacity            256
-ChunkOverlapTokens       0
-RepeatHeadingContext     true
-Document vector format   INT8
-Query vector format      FP32
-Scoring profile          DefaultV1
+Jasper model                  INT8
+DocumentChunkMaxTokens        1024
+QueryMaxTokens                1024
+ModelInstanceCount            1
+ThreadsPerModel               16
+ConcurrentRequestsPerModel    Auto (8 with default threads)
+QueueCapacity                 256
+ChunkOverlapTokens            0
+RepeatHeadingContext          true
+Document vector format        INT8
+Query vector format           FP32
+Scoring profile               DefaultV1
 ```
-
-The default queue is bounded and every configured worker owns an independent ONNX Runtime session. CPU thread budgets are configurable; the package does not create a model/session per request.
 
 ## Model cache and updates
 
-The first request (or hosted-service warmup) resolves the model, downloads runtime assets into a local cache, validates them, creates the tokenizer and ONNX worker pool, and atomically activates the snapshot.
+The first request (or hosted-service warmup) resolves the model, downloads runtime assets into a local cache, validates them, creates the tokenizer and ONNX runtime, and atomically activates the snapshot.
 
-Updates are transactional. A failed candidate does not replace a working runtime. When a successful update is activated, old sessions are disposed before old snapshot files are removed, which matters on Windows.
+Updates are transactional. A failed candidate does not replace a working runtime. When a successful update is activated, old sessions are disposed before old snapshot files are removed.
 
 ```csharp
 bool changed = await embeddingService.UpdateModelAsync();
@@ -159,13 +189,12 @@ The core package owns no database. Store `TextEmbedding` records wherever the ap
 - JSON/files
 - pgvector `vector`/`halfvec` through the optional adapter
 
-For compact portable persistence, `EmbeddingSerializer` provides JSON and a versioned binary vector representation.
-
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [Concurrency and threading](docs/concurrency.md)
 - [Model sources](docs/model-sources.md)
 - [HTTP model manifest](docs/model-manifest.md)
 - [Model cache and updates](docs/model-cache.md)
@@ -182,8 +211,6 @@ For compact portable persistence, `EmbeddingSerializer` provides JSON and a vers
 ## Scope
 
 This library is intentionally not a RAG framework, vector database, ingestion platform, PDF parser, crawler, GPU framework, or distributed embedding service. It is a focused way to add high-quality local text embeddings and good small-scale semantic search to an ordinary .NET application.
-
-If an application grows into millions of vectors, distributed ingestion, dedicated rerankers, or massive high-throughput search, use dedicated vector/search infrastructure. Keeping that boundary explicit is what lets this package stay small and easy.
 
 ## License
 

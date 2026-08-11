@@ -10,17 +10,17 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
 
     private readonly Channel<WorkItem> _channel;
     private readonly InferenceSession[] _sessions;
-    private readonly Task[] _workers;
+    private readonly Task[] _dispatchers;
     private readonly CancellationTokenSource _shutdown = new();
 
     public InferenceWorkerPool(string modelPath, InferenceOptions options)
     {
-        var workerCount = options.WorkerCount;
-        var threads = options.ThreadsPerWorker > 0
-            ? options.ThreadsPerWorker
-            : Math.Max(1, Math.Min(options.MaximumAutoThreadsPerWorker, Environment.ProcessorCount / workerCount));
+        var resolved = options.Resolve();
+        ModelInstanceCount = resolved.ModelInstanceCount;
+        ThreadsPerModel = resolved.ThreadsPerModel;
+        ConcurrentRequestsPerModel = resolved.ConcurrentRequestsPerModel;
 
-        _channel = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(options.QueueCapacity)
+        _channel = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(resolved.QueueCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = false,
@@ -28,23 +28,34 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
             AllowSynchronousContinuations = false
         });
 
-        _sessions = new InferenceSession[workerCount];
-        for (var i = 0; i < workerCount; i++)
+        _sessions = new InferenceSession[resolved.ModelInstanceCount];
+        for (var i = 0; i < _sessions.Length; i++)
         {
             using var sessionOptions = new SessionOptions
             {
                 ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
                 GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-                IntraOpNumThreads = threads
+                IntraOpNumThreads = resolved.ThreadsPerModel
             };
             _sessions[i] = new InferenceSession(modelPath, sessionOptions);
         }
 
         EmbeddingDimensions = ResolveEmbeddingDimensions(_sessions[0]);
-        _workers = _sessions.Select(session => Task.Run(() => WorkerLoopAsync(session, _shutdown.Token))).ToArray();
+
+        var dispatchers = new List<Task>(resolved.TotalConcurrentRequests);
+        foreach (var session in _sessions)
+        {
+            for (var i = 0; i < resolved.ConcurrentRequestsPerModel; i++)
+                dispatchers.Add(Task.Run(() => WorkerLoopAsync(session, _shutdown.Token)));
+        }
+        _dispatchers = dispatchers.ToArray();
     }
 
     public int? EmbeddingDimensions { get; }
+    public int ModelInstanceCount { get; }
+    public int ThreadsPerModel { get; }
+    public int ConcurrentRequestsPerModel { get; }
+    public int TotalConcurrentRequests => ModelInstanceCount * ConcurrentRequestsPerModel;
 
     public async Task<float[]> RunAsync(TokenizedModelInput input, CancellationToken cancellationToken)
     {
@@ -68,6 +79,8 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
 
                 try
                 {
+                    // ONNX Runtime sessions support concurrent Run calls. Multiple dispatchers intentionally share
+                    // this session so request concurrency no longer requires duplicating the model in memory.
                     work.Completion.TrySetResult(Run(session, work.Input));
                 }
                 catch (Exception ex)
@@ -88,22 +101,16 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
         foreach (var name in session.InputMetadata.Keys)
         {
             if (name.Equals("input_ids", StringComparison.OrdinalIgnoreCase))
-            {
                 inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>(input.InputIds, new[] { 1, sequenceLength })));
-            }
             else if (name.Equals("attention_mask", StringComparison.OrdinalIgnoreCase))
-            {
                 inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>(input.AttentionMask, new[] { 1, sequenceLength })));
-            }
             else if (name.Equals("token_type_ids", StringComparison.OrdinalIgnoreCase))
             {
                 var typeIds = input.TokenTypeIds ?? new long[sequenceLength];
                 inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>(typeIds, new[] { 1, sequenceLength })));
             }
             else
-            {
                 throw new ModelValidationException($"Unsupported required ONNX model input '{name}'. Configure a compatible sentence-embedding model.");
-            }
         }
 
         using var results = session.Run(inputs);
@@ -137,9 +144,7 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
                 vector[d] /= included;
         }
         else
-        {
             throw new ModelValidationException($"Unsupported ONNX output rank/shape: [{string.Join(',', dimensions)}].");
-        }
 
         EmbeddingVectorMath.NormalizeInPlace(vector);
         return vector;
@@ -161,7 +166,7 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
     {
         _channel.Writer.TryComplete();
         _shutdown.Cancel();
-        try { await Task.WhenAll(_workers).ConfigureAwait(false); }
+        try { await Task.WhenAll(_dispatchers).ConfigureAwait(false); }
         catch (OperationCanceledException) { }
         foreach (var session in _sessions)
             session.Dispose();

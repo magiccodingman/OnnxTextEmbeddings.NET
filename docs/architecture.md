@@ -13,7 +13,10 @@ structure-aware chunker
    ↓
 bounded inference queue
    ↓
-independent ONNX Runtime CPU workers
+1..N ONNX Runtime sessions/model instances
+   ├─ concurrent Run slot 1
+   ├─ concurrent Run slot 2
+   └─ ...
    ↓
 versioned embedding records
    ↓
@@ -30,7 +33,21 @@ The tokenizer is created once per active runtime. Source tokenization records of
 
 ## Inference concurrency
 
-Inference uses a bounded channel. `WorkerCount = 1` is the default. Additional workers create independent ONNX sessions rather than attempting concurrent mutation of one session. Each worker receives its own intra-op thread budget.
+A model instance is one `InferenceSession`, not one request slot. ONNX Runtime sessions can service concurrent `Run()` calls, so each session is paired with multiple queue dispatchers.
+
+Default runtime topology:
+
+```text
+ModelInstanceCount = 1
+ThreadsPerModel = 16
+ConcurrentRequestsPerModel = Auto → 8
+```
+
+This provides eight in-flight inference calls while keeping one model copy in memory. Additional model instances remain available when deliberately configured and multiply total concurrency as well as model/session memory.
+
+## Token accounting API
+
+The service exposes a simple source token count plus a query-aware count result. The latter distinguishes source tokens from final model-input tokens and can report an oversized query with `Fits = false` without throwing. The actual query embedding API still enforces the configured limit by exception.
 
 ## Stable records
 
