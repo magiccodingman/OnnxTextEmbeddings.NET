@@ -44,7 +44,7 @@ internal sealed class StructuredTextChunker(
 
         var pieces = new List<Piece>();
         foreach (var section in ScanSections(text))
-            SplitSection(text, source, section, baseCapacity, specialTokens, pieces);
+            SplitSection(text, source, section, baseCapacity, pieces);
 
         // Pack adjacent complete Markdown sections where possible. Split continuations remain isolated.
         var packed = new List<Piece>();
@@ -78,7 +78,6 @@ internal sealed class StructuredTextChunker(
         TokenizedSource source,
         Section section,
         int baseCapacity,
-        int specialTokens,
         List<Piece> output)
     {
         var fullRange = new Utf16TextRange(section.Start, section.End - section.Start);
@@ -94,6 +93,7 @@ internal sealed class StructuredTextChunker(
             : null;
         var contextTokens = string.IsNullOrEmpty(context) ? 0 : tokenizer.CountSourceTokens(context + "\n\n");
         var continuationCapacity = Math.Max(1, baseCapacity - contextTokens);
+        var overlapTokens = Math.Min(options.Chunking.ChunkOverlapTokens, Math.Max(0, continuationCapacity - 1));
 
         var cursor = section.Start;
         var first = true;
@@ -102,14 +102,24 @@ internal sealed class StructuredTextChunker(
             var remainingRange = new Utf16TextRange(cursor, section.End - cursor);
             var remainingTokens = source.GetTokenRange(remainingRange);
             var capacity = first ? baseCapacity : continuationCapacity;
-            if (remainingTokens.Length <= capacity)
+            var overlap = first ? 0 : overlapTokens;
+            var newContentCapacity = Math.Max(1, capacity - overlap);
+            var pieceStart = first ? cursor : FindOverlapStart(source, section.Start, cursor, overlap);
+
+            if (remainingTokens.Length <= newContentCapacity)
             {
-                output.Add(new Piece(cursor, section.End, first ? ChunkBoundaryKind.MarkdownSection : ChunkBoundaryKind.ParagraphGroup, section.HeadingPath, !first, capacity));
+                output.Add(new Piece(
+                    pieceStart,
+                    section.End,
+                    first ? ChunkBoundaryKind.MarkdownSection : ChunkBoundaryKind.ParagraphGroup,
+                    section.HeadingPath,
+                    !first,
+                    capacity));
                 break;
             }
 
             var tokenStart = remainingTokens.Start;
-            var targetEnd = source.CharacterEndForTokenCount(tokenStart, capacity, section.End);
+            var targetEnd = source.CharacterEndForTokenCount(tokenStart, newContentCapacity, section.End);
             targetEnd = Math.Clamp(targetEnd, cursor + 1, section.End);
             var (breakAt, kind) = FindPreferredBreak(text, cursor, targetEnd);
             if (breakAt <= cursor)
@@ -117,10 +127,31 @@ internal sealed class StructuredTextChunker(
                 breakAt = targetEnd;
                 kind = ChunkBoundaryKind.TokenWindow;
             }
-            output.Add(new Piece(cursor, breakAt, kind, section.HeadingPath, !first, capacity));
+
+            output.Add(new Piece(pieceStart, breakAt, kind, section.HeadingPath, !first, capacity));
             cursor = breakAt;
             first = false;
         }
+    }
+
+    private static int FindOverlapStart(
+        TokenizedSource source,
+        int sectionStart,
+        int cursor,
+        int overlapTokens)
+    {
+        if (overlapTokens <= 0 || cursor <= sectionStart)
+            return cursor;
+
+        var priorRange = source.GetTokenRange(new Utf16TextRange(sectionStart, cursor - sectionStart));
+        if (priorRange.Length <= 0)
+            return cursor;
+
+        var overlapStartToken = Math.Max(priorRange.Start, priorRange.End - overlapTokens);
+        if (overlapStartToken < 0 || overlapStartToken >= source.Offsets.Length)
+            return cursor;
+
+        return Math.Max(sectionStart, source.Offsets[overlapStartToken].Start);
     }
 
     private PreparedChunk FinalizePiece(
@@ -137,7 +168,7 @@ internal sealed class StructuredTextChunker(
         var modelText = string.IsNullOrEmpty(context) ? sourceText : context + "\n\n" + sourceText;
         var encoded = tokenizer.EncodeModelInput(modelText);
         if (encoded.TokenCount > modelInputLimit)
-            throw new ModelValidationException($"Chunk finalization produced {encoded.TokenCount} model tokens, exceeding the configured limit of {modelInputLimit}. Reduce the document chunk limit or heading context.");
+            throw new ModelValidationException($"Chunk finalization produced {encoded.TokenCount} model tokens, exceeding the configured limit of {modelInputLimit}. Reduce the document chunk limit, overlap, or heading context.");
 
         var characterRange = new Utf16TextRange(piece.Start, piece.End - piece.Start);
         var tokenRange = source.GetTokenRange(characterRange);
@@ -160,7 +191,6 @@ internal sealed class StructuredTextChunker(
 
     private static (int BreakAt, ChunkBoundaryKind Kind) FindPreferredBreak(string text, int start, int targetEnd)
     {
-        // paragraph boundary
         for (var i = targetEnd - 1; i > start; i--)
         {
             if (i + 1 < text.Length && text[i] == '\n' && text[i + 1] == '\n')
@@ -169,14 +199,12 @@ internal sealed class StructuredTextChunker(
                 return (i + 4, ChunkBoundaryKind.ParagraphGroup);
         }
 
-        // sentence boundary
         for (var i = targetEnd - 1; i > start; i--)
         {
             if (text[i] is '.' or '!' or '?' or '。' or '！' or '？')
                 return (i + 1, ChunkBoundaryKind.SentenceGroup);
         }
 
-        // word boundary
         for (var i = targetEnd - 1; i > start; i--)
         {
             if (char.IsWhiteSpace(text[i]))
