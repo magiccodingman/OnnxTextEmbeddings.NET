@@ -47,10 +47,7 @@ public sealed class ModelOptions
     public string? ModelFile { get; set; }
     public ModelUpdatePolicy UpdatePolicy { get; set; } = ModelUpdatePolicy.OnStartup;
 
-    public void UseJasper(JasperModelPrecision precision)
-    {
-        UseHuggingFace(JasperModelPresets.GetRepository(precision));
-    }
+    public void UseJasper(JasperModelPrecision precision) => UseHuggingFace(JasperModelPresets.GetRepository(precision));
 
     public void UseHuggingFace(string repositoryId, string revision = "main")
     {
@@ -89,13 +86,89 @@ public sealed class ModelCacheOptions
     public int LockedFileDeleteRetries { get; set; } = 5;
 }
 
+public static class InferenceDefaults
+{
+    public const int ThreadsPerModel = 16;
+    public const int AutomaticConcurrentRequestsPerModelCap = 8;
+}
+
+internal sealed record ResolvedInferenceOptions(
+    int ModelInstanceCount,
+    int ThreadsPerModel,
+    int ConcurrentRequestsPerModel,
+    int QueueCapacity)
+{
+    public int TotalConcurrentRequests => ModelInstanceCount * ConcurrentRequestsPerModel;
+}
+
 public sealed class InferenceOptions
 {
-    public int WorkerCount { get; set; } = 1;
-    /// <summary>Zero means automatic.</summary>
-    public int ThreadsPerWorker { get; set; }
-    public int MaximumAutoThreadsPerWorker { get; set; } = 12;
+    private int _modelInstanceCount = 1;
+    private int _threadsPerModel = InferenceDefaults.ThreadsPerModel;
+    private int _maximumAutoThreadsPerModel = InferenceDefaults.ThreadsPerModel;
+
+    /// <summary>Number of independent ONNX sessions/model copies kept in memory. Default is one.</summary>
+    public int ModelInstanceCount
+    {
+        get => _modelInstanceCount;
+        set => _modelInstanceCount = value;
+    }
+
+    /// <summary>ONNX Runtime intra-op threads per model instance. Zero enables hardware-based automatic resolution. Default is 16.</summary>
+    public int ThreadsPerModel
+    {
+        get => _threadsPerModel;
+        set => _threadsPerModel = value;
+    }
+
+    /// <summary>Maximum thread count used only when <see cref="ThreadsPerModel"/> is zero.</summary>
+    public int MaximumAutoThreadsPerModel
+    {
+        get => _maximumAutoThreadsPerModel;
+        set => _maximumAutoThreadsPerModel = value;
+    }
+
+    /// <summary>
+    /// Simultaneous inference calls allowed per model instance. Zero means automatic: ThreadsPerModel / 2,
+    /// with a minimum of one and an automatic cap of eight. Explicit positive values are honored as-is.
+    /// </summary>
+    public int ConcurrentRequestsPerModel { get; set; }
+
     public int QueueCapacity { get; set; } = 256;
+
+    [Obsolete("Use ModelInstanceCount. A model instance may now execute multiple requests concurrently.")]
+    public int WorkerCount
+    {
+        get => ModelInstanceCount;
+        set => ModelInstanceCount = value;
+    }
+
+    [Obsolete("Use ThreadsPerModel.")]
+    public int ThreadsPerWorker
+    {
+        get => ThreadsPerModel;
+        set => ThreadsPerModel = value;
+    }
+
+    [Obsolete("Use MaximumAutoThreadsPerModel.")]
+    public int MaximumAutoThreadsPerWorker
+    {
+        get => MaximumAutoThreadsPerModel;
+        set => MaximumAutoThreadsPerModel = value;
+    }
+
+    internal ResolvedInferenceOptions Resolve()
+    {
+        var threads = ThreadsPerModel > 0
+            ? ThreadsPerModel
+            : Math.Max(1, Math.Min(MaximumAutoThreadsPerModel, Environment.ProcessorCount / ModelInstanceCount));
+
+        var concurrency = ConcurrentRequestsPerModel > 0
+            ? ConcurrentRequestsPerModel
+            : Math.Clamp(threads / 2, 1, InferenceDefaults.AutomaticConcurrentRequestsPerModelCap);
+
+        return new ResolvedInferenceOptions(ModelInstanceCount, threads, concurrency, QueueCapacity);
+    }
 }
 
 public sealed class ChunkingOptions
@@ -144,12 +217,14 @@ public sealed class OnnxTextEmbeddingsOptions
             throw new ArgumentOutOfRangeException(nameof(DocumentChunkMaxTokens));
         if (QueryMaxTokens <= 0)
             throw new ArgumentOutOfRangeException(nameof(QueryMaxTokens));
-        if (Inference.WorkerCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(Inference.WorkerCount));
-        if (Inference.ThreadsPerWorker < 0)
-            throw new ArgumentOutOfRangeException(nameof(Inference.ThreadsPerWorker));
-        if (Inference.MaximumAutoThreadsPerWorker <= 0)
-            throw new ArgumentOutOfRangeException(nameof(Inference.MaximumAutoThreadsPerWorker));
+        if (Inference.ModelInstanceCount <= 0)
+            throw new ArgumentOutOfRangeException(nameof(Inference.ModelInstanceCount));
+        if (Inference.ThreadsPerModel < 0)
+            throw new ArgumentOutOfRangeException(nameof(Inference.ThreadsPerModel));
+        if (Inference.MaximumAutoThreadsPerModel <= 0)
+            throw new ArgumentOutOfRangeException(nameof(Inference.MaximumAutoThreadsPerModel));
+        if (Inference.ConcurrentRequestsPerModel < 0)
+            throw new ArgumentOutOfRangeException(nameof(Inference.ConcurrentRequestsPerModel));
         if (Inference.QueueCapacity <= 0)
             throw new ArgumentOutOfRangeException(nameof(Inference.QueueCapacity));
         if (Chunking.ChunkOverlapTokens < 0)
