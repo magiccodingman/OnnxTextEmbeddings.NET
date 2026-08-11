@@ -140,8 +140,6 @@ internal sealed class OnnxInferenceSessionHandle : IInferenceSessionHandle
         var names = session.InputMetadata.Keys.ToArray();
         if (!names.Any(name => name.Equals("input_ids", StringComparison.OrdinalIgnoreCase)))
             throw new ModelValidationException("The ONNX model does not expose an input_ids input.");
-        if (!names.Any(name => name.Equals("attention_mask", StringComparison.OrdinalIgnoreCase)))
-            throw new ModelValidationException("The ONNX model does not expose an attention_mask input.");
         foreach (var name in names)
         {
             if (!name.Equals("input_ids", StringComparison.OrdinalIgnoreCase) &&
