@@ -129,6 +129,7 @@ public sealed class SemanticSearchTests
         public Task WaitUntilReadyAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<bool> UpdateModelAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<IReadOnlyList<TextEmbedding>> EmbedAsync(string text, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(string text, CancellationToken cancellationToken = default) => EmbedAsync(text, cancellationToken);
         public Task<QueryEmbedding> EmbedQueryAsync(string query, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
