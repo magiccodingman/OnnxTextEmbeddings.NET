@@ -23,7 +23,7 @@ public sealed class PgVectorExtensionsTests
         var values = native.ToArray();
 
         Assert.Equal(5, values.Length);
-        Assert.True(values.Any(x => x != 0));
+        Assert.Contains(values, x => x != 0);
     }
 
     [Fact]
