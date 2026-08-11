@@ -26,6 +26,10 @@ public sealed record ModelRuntimeInfo(
     public int ThreadsPerModel { get; init; }
     public int ConcurrentRequestsPerModel { get; init; }
     public int TotalConcurrentRequests => ModelInstanceCount * ConcurrentRequestsPerModel;
+    public int HealthyModelInstanceCount { get; init; }
+    public int RecoveringModelInstanceCount { get; init; }
+    public int ActiveRequests { get; init; }
+    public IReadOnlyList<ModelInstanceRuntimeInfo> Instances { get; init; } = Array.Empty<ModelInstanceRuntimeInfo>();
 }
 
 public sealed record EmbeddingServiceStatus(
@@ -44,6 +48,20 @@ public interface ITextEmbeddingService : IAsyncDisposable
     Task<IReadOnlyList<TextEmbedding>> EmbedAsync(string text, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(string text, CancellationToken cancellationToken = default);
     Task<QueryEmbedding> EmbedQueryAsync(string query, CancellationToken cancellationToken = default);
+
+    async Task<QueryTokenCount> CountQueryTokensAsync(
+        string query,
+        QueryEmbeddingRequestOptions requestOptions,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(requestOptions);
+        var count = await CountQueryTokensAsync(query, cancellationToken).ConfigureAwait(false);
+        if (requestOptions.MaxTokens is null)
+            return count;
+        if (requestOptions.MaxTokens <= 0)
+            throw new ArgumentOutOfRangeException(nameof(requestOptions), "MaxTokens must be greater than zero.");
+        return count with { QueryMaxTokens = requestOptions.MaxTokens.Value };
+    }
 
     /// <summary>
     /// Embeds text using the requested return format for this call. Implementations may override this to encode
@@ -77,6 +95,45 @@ public interface ITextEmbeddingService : IAsyncDisposable
         var embedding = await EmbedQueryAsync(query, cancellationToken).ConfigureAwait(false);
         return embedding with { Vector = embedding.Vector.ConvertTo(format) };
     }
+
+    async Task<IReadOnlyList<TextEmbedding>> EmbedAsync(
+        string text,
+        EmbeddingRequestOptions requestOptions,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(requestOptions);
+        if (requestOptions.MaxTokens is not null)
+            throw new NotSupportedException("This ITextEmbeddingService implementation does not support per-call document token limits.");
+        return requestOptions.VectorFormat is { } format
+            ? await EmbedAsync(text, format, cancellationToken).ConfigureAwait(false)
+            : await EmbedAsync(text, cancellationToken).ConfigureAwait(false);
+    }
+
+    async Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
+        string text,
+        EmbeddingRequestOptions requestOptions,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(requestOptions);
+        if (requestOptions.MaxTokens is not null)
+            throw new NotSupportedException("This ITextEmbeddingService implementation does not support per-call document token limits.");
+        return requestOptions.VectorFormat is { } format
+            ? await EmbedDocumentAsync(text, format, cancellationToken).ConfigureAwait(false)
+            : await EmbedDocumentAsync(text, cancellationToken).ConfigureAwait(false);
+    }
+
+    async Task<QueryEmbedding> EmbedQueryAsync(
+        string query,
+        QueryEmbeddingRequestOptions requestOptions,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(requestOptions);
+        if (requestOptions.MaxTokens is not null)
+            throw new NotSupportedException("This ITextEmbeddingService implementation does not support per-call query token limits.");
+        return requestOptions.VectorFormat is { } format
+            ? await EmbedQueryAsync(query, format, cancellationToken).ConfigureAwait(false)
+            : await EmbedQueryAsync(query, cancellationToken).ConfigureAwait(false);
+    }
 }
 
 internal sealed class TextEmbeddingService(
@@ -90,10 +147,29 @@ internal sealed class TextEmbeddingService(
     private HuggingFaceEmbeddingTokenizer? _tokenizer;
     private StructuredTextChunker? _chunker;
     private InferenceWorkerPool? _workers;
+    private ModelRuntimeInfo? _modelInfo;
     private bool _disposed;
 
     public EmbeddingServiceStatus Status => _status;
-    public ModelRuntimeInfo? ModelInfo { get; private set; }
+
+    public ModelRuntimeInfo? ModelInfo
+    {
+        get
+        {
+            var info = _modelInfo;
+            var workers = _workers;
+            if (info is null || workers is null)
+                return info;
+            var instances = workers.GetRuntimeInfo();
+            return info with
+            {
+                HealthyModelInstanceCount = instances.Count(instance => instance.Health == ModelInstanceHealth.Healthy),
+                RecoveringModelInstanceCount = instances.Count(instance => instance.Health is ModelInstanceHealth.Draining or ModelInstanceHealth.Recovering or ModelInstanceHealth.Faulted),
+                ActiveRequests = instances.Sum(instance => instance.ActiveRequests),
+                Instances = instances
+            };
+        }
+    }
 
     public Task WaitUntilReadyAsync(CancellationToken cancellationToken = default)
     {
@@ -138,7 +214,11 @@ internal sealed class TextEmbeddingService(
                 _status = new EmbeddingServiceStatus(EmbeddingServiceState.Loading);
 
                 candidateTokenizer = new HuggingFaceEmbeddingTokenizer(candidate.Snapshot.TokenizerPath);
-                candidateWorkers = new InferenceWorkerPool(candidate.Snapshot.ModelPath, options.Inference);
+                candidateWorkers = new InferenceWorkerPool(
+                    candidate.Snapshot.ModelPath,
+                    options.Inference,
+                    options.Model.JasperPrecision,
+                    logger);
                 var candidateChunker = new StructuredTextChunker(candidateTokenizer, options);
 
                 await modelCache.PromoteAsync(candidate, cancellationToken).ConfigureAwait(false);
@@ -152,7 +232,7 @@ internal sealed class TextEmbeddingService(
                 candidateTokenizer = null;
                 candidateWorkers = null;
 
-                ModelInfo = new ModelRuntimeInfo(
+                _modelInfo = new ModelRuntimeInfo(
                     candidate.Snapshot.ModelId,
                     candidate.Snapshot.SourceRevision,
                     candidate.Snapshot.EmbeddingSpaceFingerprint,
@@ -233,39 +313,63 @@ internal sealed class TextEmbeddingService(
         return _tokenizer!.CountSourceTokens(text);
     }
 
-    public async Task<QueryTokenCount> CountQueryTokensAsync(string query, CancellationToken cancellationToken = default)
+    public Task<QueryTokenCount> CountQueryTokensAsync(string query, CancellationToken cancellationToken = default) =>
+        CountQueryTokensAsync(query, new QueryEmbeddingRequestOptions(), cancellationToken);
+
+    public async Task<QueryTokenCount> CountQueryTokensAsync(
+        string query,
+        QueryEmbeddingRequestOptions requestOptions,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(requestOptions);
         await WaitUntilReadyAsync(cancellationToken).ConfigureAwait(false);
-        return CreateQueryTokenCount(query, out _);
+        var queryMaxTokens = ResolveQueryMaxTokens(requestOptions);
+        return CreateQueryTokenCount(query, queryMaxTokens, out _);
     }
 
     public Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
         string text,
         CancellationToken cancellationToken = default) =>
-        EmbedAsync(text, options.Vectors.DocumentFormat, cancellationToken);
+        EmbedAsync(text, new EmbeddingRequestOptions(), cancellationToken);
 
     public Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
         string text,
         EmbeddingVectorFormat format,
         CancellationToken cancellationToken = default) =>
-        EmbedAsync(text, format, cancellationToken);
+        EmbedAsync(text, new EmbeddingRequestOptions { VectorFormat = format }, cancellationToken);
+
+    public Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
+        string text,
+        EmbeddingRequestOptions requestOptions,
+        CancellationToken cancellationToken = default) =>
+        EmbedAsync(text, requestOptions, cancellationToken);
 
     public Task<IReadOnlyList<TextEmbedding>> EmbedAsync(
         string text,
         CancellationToken cancellationToken = default) =>
-        EmbedAsync(text, options.Vectors.DocumentFormat, cancellationToken);
+        EmbedAsync(text, new EmbeddingRequestOptions(), cancellationToken);
+
+    public Task<IReadOnlyList<TextEmbedding>> EmbedAsync(
+        string text,
+        EmbeddingVectorFormat format,
+        CancellationToken cancellationToken = default) =>
+        EmbedAsync(text, new EmbeddingRequestOptions { VectorFormat = format }, cancellationToken);
 
     public async Task<IReadOnlyList<TextEmbedding>> EmbedAsync(
         string text,
-        EmbeddingVectorFormat format,
+        EmbeddingRequestOptions requestOptions,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(requestOptions);
         await WaitUntilReadyAsync(cancellationToken).ConfigureAwait(false);
         if (text.Length == 0) return Array.Empty<TextEmbedding>();
+
+        var maxTokens = ResolveDocumentMaxTokens(requestOptions);
+        var format = requestOptions.VectorFormat ?? options.Vectors.DocumentFormat;
         var snapshot = _snapshot!;
-        var chunks = _chunker!.Chunk(text, options.DocumentChunkMaxTokens);
+        var chunks = _chunker!.Chunk(text, maxTokens);
         var tasks = chunks.Select(chunk => _workers!.RunAsync(chunk.ModelInput, cancellationToken)).ToArray();
         var vectors = await Task.WhenAll(tasks).ConfigureAwait(false);
         var identity = CreateIdentity(snapshot);
@@ -307,34 +411,60 @@ internal sealed class TextEmbeddingService(
     public Task<QueryEmbedding> EmbedQueryAsync(
         string query,
         CancellationToken cancellationToken = default) =>
-        EmbedQueryAsync(query, options.Vectors.QueryFormat, cancellationToken);
+        EmbedQueryAsync(query, new QueryEmbeddingRequestOptions(), cancellationToken);
+
+    public Task<QueryEmbedding> EmbedQueryAsync(
+        string query,
+        EmbeddingVectorFormat format,
+        CancellationToken cancellationToken = default) =>
+        EmbedQueryAsync(query, new QueryEmbeddingRequestOptions { VectorFormat = format }, cancellationToken);
 
     public async Task<QueryEmbedding> EmbedQueryAsync(
         string query,
-        EmbeddingVectorFormat format,
+        QueryEmbeddingRequestOptions requestOptions,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        ArgumentNullException.ThrowIfNull(requestOptions);
         await WaitUntilReadyAsync(cancellationToken).ConfigureAwait(false);
-        var count = CreateQueryTokenCount(query, out var input);
+        var queryMaxTokens = ResolveQueryMaxTokens(requestOptions);
+        var count = CreateQueryTokenCount(query, queryMaxTokens, out var input);
         if (!count.Fits)
             throw new QueryTokenLimitExceededException(count.SourceTokenCount, count.InputTokenCount, count.QueryMaxTokens, count.ModelMaxTokens);
 
         var values = await _workers!.RunAsync(input, cancellationToken).ConfigureAwait(false);
         return new QueryEmbedding
         {
-            Vector = EmbeddingVector.FromFloat32(values, format),
+            Vector = EmbeddingVector.FromFloat32(values, requestOptions.VectorFormat ?? options.Vectors.QueryFormat),
             Identity = CreateIdentity(_snapshot!),
             SourceTokenCount = count.SourceTokenCount,
             InputTokenCount = count.InputTokenCount
         };
     }
 
-    private QueryTokenCount CreateQueryTokenCount(string query, out TokenizedModelInput input)
+    private int ResolveDocumentMaxTokens(EmbeddingRequestOptions requestOptions)
+    {
+        var maxTokens = requestOptions.MaxTokens ?? options.DocumentChunkMaxTokens;
+        if (maxTokens <= 0)
+            throw new ArgumentOutOfRangeException(nameof(requestOptions), "MaxTokens must be greater than zero.");
+        if (_snapshot!.ModelMaxTokens is { } hardLimit && maxTokens > hardLimit)
+            throw new ArgumentOutOfRangeException(nameof(requestOptions), $"MaxTokens ({maxTokens}) exceeds the model maximum ({hardLimit}).");
+        return maxTokens;
+    }
+
+    private int ResolveQueryMaxTokens(QueryEmbeddingRequestOptions requestOptions)
+    {
+        var maxTokens = requestOptions.MaxTokens ?? options.QueryMaxTokens;
+        if (maxTokens <= 0)
+            throw new ArgumentOutOfRangeException(nameof(requestOptions), "MaxTokens must be greater than zero.");
+        return maxTokens;
+    }
+
+    private QueryTokenCount CreateQueryTokenCount(string query, int queryMaxTokens, out TokenizedModelInput input)
     {
         var sourceTokens = _tokenizer!.CountSourceTokens(query);
         input = _tokenizer.EncodeModelInput(query);
-        return new QueryTokenCount(sourceTokens, input.TokenCount, options.QueryMaxTokens, _snapshot!.ModelMaxTokens);
+        return new QueryTokenCount(sourceTokens, input.TokenCount, queryMaxTokens, _snapshot!.ModelMaxTokens);
     }
 
     private static EmbeddingIdentity CreateIdentity(ModelSnapshot snapshot) => new()

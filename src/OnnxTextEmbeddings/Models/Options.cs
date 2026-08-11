@@ -47,7 +47,16 @@ public sealed class ModelOptions
     public string? ModelFile { get; set; }
     public ModelUpdatePolicy UpdatePolicy { get; set; } = ModelUpdatePolicy.OnStartup;
 
-    public void UseJasper(JasperModelPrecision precision) => UseHuggingFace(JasperModelPresets.GetRepository(precision));
+    /// <summary>
+    /// Identifies a built-in Jasper tuning profile. Null means the model is custom and global inference defaults apply.
+    /// </summary>
+    public JasperModelPrecision? JasperPrecision { get; private set; } = JasperModelPrecision.Int8;
+
+    public void UseJasper(JasperModelPrecision precision)
+    {
+        UseHuggingFace(JasperModelPresets.GetRepository(precision));
+        JasperPrecision = precision;
+    }
 
     public void UseHuggingFace(string repositoryId, string revision = "main")
     {
@@ -57,6 +66,7 @@ public sealed class ModelOptions
         Revision = string.IsNullOrWhiteSpace(revision) ? "main" : revision;
         LocalDirectory = null;
         ManifestUri = null;
+        JasperPrecision = null;
     }
 
     public void UseLocalDirectory(string path)
@@ -65,6 +75,7 @@ public sealed class ModelOptions
         SourceKind = ModelSourceKind.LocalDirectory;
         LocalDirectory = path;
         ManifestUri = null;
+        JasperPrecision = null;
     }
 
     public void UseHttpManifest(Uri manifestUri)
@@ -75,6 +86,7 @@ public sealed class ModelOptions
         SourceKind = ModelSourceKind.HttpManifest;
         ManifestUri = manifestUri;
         LocalDirectory = null;
+        JasperPrecision = null;
     }
 }
 
@@ -89,7 +101,8 @@ public sealed class ModelCacheOptions
 public static class InferenceDefaults
 {
     public const int ThreadsPerModel = 16;
-    public const int AutomaticConcurrentRequestsPerModelCap = 8;
+    public const int AutomaticConcurrentRequestsPerModelCap = 4;
+    public const int JasperInt8AutomaticConcurrentRequestsPerModelCap = 5;
 }
 
 internal sealed record ResolvedInferenceOptions(
@@ -130,7 +143,7 @@ public sealed class InferenceOptions
 
     /// <summary>
     /// Simultaneous inference calls allowed per model instance. Zero means automatic: ThreadsPerModel / 2,
-    /// with a minimum of one and an automatic cap of eight. Explicit positive values are honored as-is.
+    /// capped at four globally or five for the built-in Jasper INT8 preset. Explicit positive values are honored as-is.
     /// </summary>
     public int ConcurrentRequestsPerModel { get; set; }
 
@@ -157,15 +170,19 @@ public sealed class InferenceOptions
         set => MaximumAutoThreadsPerModel = value;
     }
 
-    internal ResolvedInferenceOptions Resolve()
+    internal ResolvedInferenceOptions Resolve(JasperModelPrecision? jasperPrecision = null)
     {
         var threads = ThreadsPerModel > 0
             ? ThreadsPerModel
             : Math.Max(1, Math.Min(MaximumAutoThreadsPerModel, Environment.ProcessorCount / ModelInstanceCount));
 
+        var automaticCap = jasperPrecision == JasperModelPrecision.Int8
+            ? InferenceDefaults.JasperInt8AutomaticConcurrentRequestsPerModelCap
+            : InferenceDefaults.AutomaticConcurrentRequestsPerModelCap;
+
         var concurrency = ConcurrentRequestsPerModel > 0
             ? ConcurrentRequestsPerModel
-            : Math.Clamp(threads / 2, 1, InferenceDefaults.AutomaticConcurrentRequestsPerModelCap);
+            : Math.Clamp(threads / 2, 1, automaticCap);
 
         return new ResolvedInferenceOptions(ModelInstanceCount, threads, concurrency, QueueCapacity);
     }
