@@ -54,6 +54,7 @@ public sealed class QueryTokenLimitExceededException : OnnxTextEmbeddingsExcepti
 
 public sealed class InferenceException : OnnxTextEmbeddingsException
 {
+    public InferenceException(string message) : base(message) { }
     public InferenceException(string message, Exception innerException) : base(message, innerException) { }
 }
 

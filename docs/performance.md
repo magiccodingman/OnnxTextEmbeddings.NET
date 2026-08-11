@@ -14,25 +14,54 @@ ThreadsPerModel               16
 ConcurrentRequestsPerModel    Auto → 8
 ```
 
-The default uses one model copy in memory and allows eight simultaneous requests against it.
-
 ## Automatic concurrency
 
-When concurrency is left at zero, it resolves to half the model's thread count with a cap of eight and a minimum of one. This gives 2 concurrent requests at 4 threads, 4 at 8 threads, 6 at 12 threads, and 8 at 16 or more threads.
+When concurrency is left at zero, it resolves to half the model's thread count with a cap of eight and a minimum of one:
 
-Explicit values are allowed above eight, but **8 concurrent requests per model is the recommended maximum**. Personal benchmark results showed little or no additional throughput benefit beyond that point, so the library does not automatically push higher.
+```text
+max(1, min(ThreadsPerModel / 2, 8))
+```
+
+This gives 2 concurrent requests at 4 threads, 4 at 8 threads, 6 at 12 threads, and 8 at 16 or more threads.
+
+Explicit values are allowed above eight; the automatic cap is simply the package's conservative default boundary.
 
 ## Multiple model instances
 
-`ModelInstanceCount > 1` creates additional independent ONNX sessions/model copies. This can increase memory substantially and is no longer required simply to support concurrent callers. Increase it only when a target machine's benchmarks show a benefit.
+`ModelInstanceCount > 1` creates additional independent ONNX sessions/model copies. It is supported, load-balanced, and self-healing—but it is **not expected to increase throughput in the normal case**.
+
+The common CPU bottleneck after a session is sufficiently busy is shared platform throughput: memory bandwidth, caches, memory controllers/interconnects, or another part of the CPU-to-RAM path. Adding another full model copy can therefore consume substantially more RAM while competing for the same limiting resource.
+
+Use multiple model instances for experimental benchmarking, unusual CPU/NUMA/memory layouts, or machines where measurements prove a benefit. A future/experimental optimization could isolate model sessions by CPU topology (for example NUMA nodes, CPU groups, or AMD CCD-related layouts), bind their threads, and preserve memory locality so they interfere less with one another. Whether that works is hardware-specific and should be measured rather than assumed.
+
+When multiple copies are enabled, least-loaded routing makes the best use of the capacity you chose to provision:
+
+```text
+A 3/8
+B 2/8  ← next request
+```
 
 ## Token limits
 
-Concurrency never changes the request budget. `DocumentChunkMaxTokens = 1024` and `QueryMaxTokens = 1024` are independent per-request defaults. Eight concurrent queries may each independently use up to their configured query maximum.
+Concurrency never changes request budgets. `DocumentChunkMaxTokens = 1024` and `QueryMaxTokens = 1024` are independent per-request defaults.
+
+Those defaults can be overridden for individual calls:
+
+```csharp
+var chunks = await embeddingService.EmbedDocumentAsync(
+    text,
+    new EmbeddingRequestOptions { MaxTokens = 512 });
+
+var query = await embeddingService.EmbedQueryAsync(
+    queryText,
+    new QueryEmbeddingRequestOptions { MaxTokens = 2048 });
+```
+
+Document overrides change chunk size. Query overrides change the acceptance ceiling only; queries still never chunk and can never exceed the loaded model's hard token limit.
 
 ## Bounded queue
 
-Inference requests use a bounded channel (`QueueCapacity = 256` by default). This prevents burst traffic from becoming unbounded allocations.
+Inference requests use one bounded global channel (`QueueCapacity = 256` by default). If all healthy capacity is busy—or every model instance is temporarily recovering—work waits in that bounded queue. Once the queue fills, producers asynchronously wait instead of causing unbounded allocations.
 
 ## Vector size
 
@@ -51,4 +80,4 @@ Search over a precomputed `QueryEmbedding` performs no ONNX inference. For large
 
 ## Measure your machine
 
-CPU architecture, core count, memory bandwidth, model precision, thread budgets, and request concurrency materially affect throughput. Treat the defaults as a strong general-purpose starting point and benchmark before adding model instances or pushing concurrency above eight.
+CPU architecture, core count, memory bandwidth, model precision, thread budgets, and request concurrency materially affect throughput. Treat the defaults as a strong starting point and benchmark before adding model instances or overriding concurrency.

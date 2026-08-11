@@ -40,7 +40,10 @@ internal sealed class StructuredTextChunker(
             throw new ModelValidationException($"The configured input limit {modelInputLimit} leaves no room for source tokens.");
 
         if (source.Count <= baseCapacity)
-            return new[] { FinalizePiece(text, source, new Piece(0, text.Length, ChunkBoundaryKind.WholeDocument, Array.Empty<string>(), false, baseCapacity), modelInputLimit, specialTokens) };
+        {
+            var whole = new Piece(0, text.Length, ChunkBoundaryKind.WholeDocument, Array.Empty<string>(), false, baseCapacity);
+            return FinalizePieces(text, source, new[] { whole }, modelInputLimit, specialTokens);
+        }
 
         var pieces = new List<Piece>();
         foreach (var section in ScanSections(text))
@@ -70,7 +73,7 @@ internal sealed class StructuredTextChunker(
             packed.Add(piece);
         }
 
-        return packed.Select(piece => FinalizePiece(text, source, piece, modelInputLimit, specialTokens)).ToArray();
+        return FinalizePieces(text, source, packed, modelInputLimit, specialTokens);
     }
 
     private void SplitSection(
@@ -154,12 +157,117 @@ internal sealed class StructuredTextChunker(
         return Math.Max(sectionStart, source.Offsets[overlapStartToken].Start);
     }
 
-    private PreparedChunk FinalizePiece(
+    private IReadOnlyList<PreparedChunk> FinalizePieces(
+        string document,
+        TokenizedSource source,
+        IReadOnlyList<Piece> pieces,
+        int modelInputLimit,
+        int specialTokens)
+    {
+        var output = new List<PreparedChunk>(pieces.Count);
+        foreach (var piece in pieces)
+            FinalizePieceWithExactLimit(document, source, piece, modelInputLimit, specialTokens, output);
+        return output;
+    }
+
+    private void FinalizePieceWithExactLimit(
         string document,
         TokenizedSource source,
         Piece piece,
         int modelInputLimit,
+        int specialTokens,
+        List<PreparedChunk> output)
+    {
+        var remaining = piece;
+        while (remaining.Start < remaining.End)
+        {
+            if (TryFinalizePiece(document, source, remaining, modelInputLimit, specialTokens, out var finalized))
+            {
+                output.Add(finalized!);
+                return;
+            }
+
+            var fittingEnd = FindLargestFittingEnd(document, source, remaining, modelInputLimit);
+            if (fittingEnd <= remaining.Start || fittingEnd >= remaining.End)
+            {
+                throw new ModelValidationException(
+                    $"The configured input limit {modelInputLimit} is too small to finalize the next source token with its required model/context tokens.");
+            }
+
+            var (preferredEnd, preferredKind) = FindPreferredBreak(document, remaining.Start, fittingEnd);
+            var first = preferredEnd > remaining.Start
+                ? remaining with { End = preferredEnd, BoundaryKind = preferredKind }
+                : remaining with { End = fittingEnd, BoundaryKind = ChunkBoundaryKind.TokenWindow };
+
+            if (!TryFinalizePiece(document, source, first, modelInputLimit, specialTokens, out finalized))
+            {
+                first = remaining with { End = fittingEnd, BoundaryKind = ChunkBoundaryKind.TokenWindow };
+                if (!TryFinalizePiece(document, source, first, modelInputLimit, specialTokens, out finalized))
+                    throw new ModelValidationException("Unable to finalize a corrective chunk split within the configured token limit.");
+            }
+
+            output.Add(finalized!);
+            remaining = CreateCorrectiveRemainder(first.End, remaining, modelInputLimit, specialTokens);
+        }
+    }
+
+    private int FindLargestFittingEnd(
+        string document,
+        TokenizedSource source,
+        Piece piece,
+        int modelInputLimit)
+    {
+        var range = source.GetTokenRange(new Utf16TextRange(piece.Start, piece.End - piece.Start));
+        for (var tokenCount = range.Length - 1; tokenCount >= 1; tokenCount--)
+        {
+            var candidateEnd = source.CharacterEndForTokenCount(range.Start, tokenCount, piece.End);
+            if (candidateEnd <= piece.Start || candidateEnd >= piece.End)
+                continue;
+
+            var candidate = piece with { End = candidateEnd };
+            if (CountModelInputTokens(document, candidate) <= modelInputLimit)
+                return candidateEnd;
+        }
+        return -1;
+    }
+
+    private Piece CreateCorrectiveRemainder(
+        int start,
+        Piece original,
+        int modelInputLimit,
         int specialTokens)
+    {
+        var context = options.Chunking.RepeatHeadingContext && original.HeadingPath.Count > 0
+            ? string.Join(" > ", original.HeadingPath)
+            : null;
+        var contextTokens = string.IsNullOrEmpty(context) ? 0 : tokenizer.CountSourceTokens(context + "\n\n");
+        var capacity = Math.Max(1, modelInputLimit - specialTokens - contextTokens);
+        return new Piece(
+            start,
+            original.End,
+            ChunkBoundaryKind.TokenWindow,
+            original.HeadingPath,
+            true,
+            capacity);
+    }
+
+    private int CountModelInputTokens(string document, Piece piece)
+    {
+        var sourceText = document.Substring(piece.Start, piece.End - piece.Start);
+        var context = piece.Continuation && options.Chunking.RepeatHeadingContext && piece.HeadingPath.Count > 0
+            ? string.Join(" > ", piece.HeadingPath)
+            : null;
+        var modelText = string.IsNullOrEmpty(context) ? sourceText : context + "\n\n" + sourceText;
+        return tokenizer.EncodeModelInput(modelText).TokenCount;
+    }
+
+    private bool TryFinalizePiece(
+        string document,
+        TokenizedSource source,
+        Piece piece,
+        int modelInputLimit,
+        int specialTokens,
+        out PreparedChunk? chunk)
     {
         var sourceText = document.Substring(piece.Start, piece.End - piece.Start);
         var context = piece.Continuation && options.Chunking.RepeatHeadingContext && piece.HeadingPath.Count > 0
@@ -168,12 +276,15 @@ internal sealed class StructuredTextChunker(
         var modelText = string.IsNullOrEmpty(context) ? sourceText : context + "\n\n" + sourceText;
         var encoded = tokenizer.EncodeModelInput(modelText);
         if (encoded.TokenCount > modelInputLimit)
-            throw new ModelValidationException($"Chunk finalization produced {encoded.TokenCount} model tokens, exceeding the configured limit of {modelInputLimit}. Reduce the document chunk limit, overlap, or heading context.");
+        {
+            chunk = null;
+            return false;
+        }
 
         var characterRange = new Utf16TextRange(piece.Start, piece.End - piece.Start);
         var tokenRange = source.GetTokenRange(characterRange);
         var contextTokens = string.IsNullOrEmpty(context) ? 0 : tokenizer.CountSourceTokens(context + "\n\n");
-        return new PreparedChunk(
+        chunk = new PreparedChunk(
             modelText,
             sourceText,
             context,
@@ -187,6 +298,7 @@ internal sealed class StructuredTextChunker(
             contextTokens,
             specialTokens,
             encoded);
+        return true;
     }
 
     private static (int BreakAt, ChunkBoundaryKind Kind) FindPreferredBreak(string text, int start, int targetEnd)

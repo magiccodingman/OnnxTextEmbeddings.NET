@@ -47,7 +47,14 @@ public sealed class ModelOptions
     public string? ModelFile { get; set; }
     public ModelUpdatePolicy UpdatePolicy { get; set; } = ModelUpdatePolicy.OnStartup;
 
-    public void UseJasper(JasperModelPrecision precision) => UseHuggingFace(JasperModelPresets.GetRepository(precision));
+    /// <summary>Identifies the selected built-in Jasper preset when one is in use.</summary>
+    public JasperModelPrecision? JasperPrecision { get; private set; } = JasperModelPrecision.Int8;
+
+    public void UseJasper(JasperModelPrecision precision)
+    {
+        UseHuggingFace(JasperModelPresets.GetRepository(precision));
+        JasperPrecision = precision;
+    }
 
     public void UseHuggingFace(string repositoryId, string revision = "main")
     {
@@ -57,6 +64,7 @@ public sealed class ModelOptions
         Revision = string.IsNullOrWhiteSpace(revision) ? "main" : revision;
         LocalDirectory = null;
         ManifestUri = null;
+        JasperPrecision = null;
     }
 
     public void UseLocalDirectory(string path)
@@ -65,6 +73,7 @@ public sealed class ModelOptions
         SourceKind = ModelSourceKind.LocalDirectory;
         LocalDirectory = path;
         ManifestUri = null;
+        JasperPrecision = null;
     }
 
     public void UseHttpManifest(Uri manifestUri)
@@ -75,6 +84,7 @@ public sealed class ModelOptions
         SourceKind = ModelSourceKind.HttpManifest;
         ManifestUri = manifestUri;
         LocalDirectory = null;
+        JasperPrecision = null;
     }
 }
 
@@ -130,7 +140,7 @@ public sealed class InferenceOptions
 
     /// <summary>
     /// Simultaneous inference calls allowed per model instance. Zero means automatic: ThreadsPerModel / 2,
-    /// with a minimum of one and an automatic cap of eight. Explicit positive values are honored as-is.
+    /// capped at eight. Explicit positive values are honored as-is.
     /// </summary>
     public int ConcurrentRequestsPerModel { get; set; }
 
@@ -157,8 +167,9 @@ public sealed class InferenceOptions
         set => MaximumAutoThreadsPerModel = value;
     }
 
-    internal ResolvedInferenceOptions Resolve()
+    internal ResolvedInferenceOptions Resolve(JasperModelPrecision? jasperPrecision = null)
     {
+        _ = jasperPrecision; // Preset identity is intentionally not part of automatic concurrency policy.
         var threads = ThreadsPerModel > 0
             ? ThreadsPerModel
             : Math.Max(1, Math.Min(MaximumAutoThreadsPerModel, Environment.ProcessorCount / ModelInstanceCount));

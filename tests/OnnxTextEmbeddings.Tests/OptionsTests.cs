@@ -6,7 +6,7 @@ public sealed class OptionsTests
     public void Defaults_AreOpinionatedForLightweightCpuUsage()
     {
         var options = new OnnxTextEmbeddingsOptions();
-        var resolved = options.Inference.Resolve();
+        var resolved = options.Inference.Resolve(options.Model.JasperPrecision);
 
         Assert.Equal(1024, options.DocumentChunkMaxTokens);
         Assert.Equal(1024, options.QueryMaxTokens);
@@ -33,6 +33,16 @@ public sealed class OptionsTests
     {
         var options = new InferenceOptions { ThreadsPerModel = threads };
         Assert.Equal(expectedConcurrency, options.Resolve().ConcurrentRequestsPerModel);
+    }
+
+    [Theory]
+    [InlineData(JasperModelPrecision.Int8)]
+    [InlineData(JasperModelPrecision.Int4)]
+    [InlineData(JasperModelPrecision.Float32)]
+    public void AutomaticConcurrency_DoesNotDependOnJasperPrecision(JasperModelPrecision precision)
+    {
+        var options = new InferenceOptions { ThreadsPerModel = 16 };
+        Assert.Equal(8, options.Resolve(precision).ConcurrentRequestsPerModel);
     }
 
     [Fact]
@@ -70,6 +80,7 @@ public sealed class OptionsTests
         var options = new OnnxTextEmbeddingsOptions();
         options.Model.UseJasper(precision);
         Assert.Equal(expected, options.Model.RepositoryId);
+        Assert.Equal(precision, options.Model.JasperPrecision);
     }
 
     [Fact]

@@ -23,8 +23,8 @@ Console.WriteLine($"Instances: {embeddings.ModelInfo?.ModelInstanceCount}; Threa
 
 if (embeddings.ModelInfo?.Dimensions != 2048)
     throw new InvalidOperationException($"Expected Jasper to produce 2048 dimensions, got {embeddings.ModelInfo?.Dimensions}.");
-if (embeddings.ModelInfo is not { ModelInstanceCount: 1, ThreadsPerModel: 16, ConcurrentRequestsPerModel: 8 })
-    throw new InvalidOperationException("Default inference topology should be one model instance, 16 threads, and 8 concurrent requests per model.");
+if (embeddings.ModelInfo is not { ModelInstanceCount: 1, ThreadsPerModel: 16, ConcurrentRequestsPerModel: 8, HealthyModelInstanceCount: 1 })
+    throw new InvalidOperationException("Default inference topology should be one healthy model instance, 16 threads, and 8 concurrent requests/model.");
 
 const string formatProbe = "A compact semantic embedding format probe.";
 var defaultDocument = await embeddings.EmbedDocumentAsync(formatProbe);
@@ -49,11 +49,40 @@ foreach (var format in new[]
 }
 Console.WriteLine("PASS Float32 defaults and per-call INT4/INT8/FP16/FP32 return formats.");
 
+var longDocument = "# Backup Operations\n\n" + string.Join(' ', Enumerable.Repeat("database backup restoration procedure", 120));
+var defaultChunks = await embeddings.EmbedDocumentAsync(longDocument);
+var smallChunks = await embeddings.EmbedDocumentAsync(
+    longDocument,
+    new EmbeddingRequestOptions
+    {
+        MaxTokens = 64,
+        VectorFormat = EmbeddingVectorFormat.Int8
+    });
+if (smallChunks.Count <= defaultChunks.Count || smallChunks.Any(chunk => chunk.Chunk.InputTokenCount > 64) ||
+    smallChunks.Any(chunk => chunk.Vector.Format != EmbeddingVectorFormat.Int8))
+    throw new InvalidOperationException("Per-call document token-limit override did not control chunking as expected.");
+Console.WriteLine($"PASS per-call document chunk override: {defaultChunks.Count} default chunk(s) vs {smallChunks.Count} at 64 tokens.");
+
 const string normalQuery = "How do I restore my PostgreSQL database backup?";
 var sourceTokenCount = await embeddings.CountTokensAsync(normalQuery);
 var queryTokenCount = await embeddings.CountQueryTokensAsync(normalQuery);
 if (sourceTokenCount <= 0 || queryTokenCount.SourceTokenCount != sourceTokenCount || !queryTokenCount.Fits)
     throw new InvalidOperationException("Token-count API returned unexpected values for a normal query.");
+
+var strictCount = await embeddings.CountQueryTokensAsync(
+    normalQuery,
+    new QueryEmbeddingRequestOptions { MaxTokens = 4 });
+if (strictCount.Fits)
+    throw new InvalidOperationException("A stricter per-call query limit should be reflected by CountQueryTokensAsync.");
+try
+{
+    _ = await embeddings.EmbedQueryAsync(normalQuery, new QueryEmbeddingRequestOptions { MaxTokens = 4 });
+    throw new InvalidOperationException("Per-call query limit should reject input above that request's ceiling.");
+}
+catch (QueryTokenLimitExceededException)
+{
+    Console.WriteLine("PASS stricter per-call query limit.");
+}
 
 var oversizedQuery = string.Join(' ', Enumerable.Repeat("database backup restoration procedure", 400));
 var oversizedCount = await embeddings.CountQueryTokensAsync(oversizedQuery);
@@ -68,6 +97,35 @@ catch (QueryTokenLimitExceededException)
 {
     Console.WriteLine($"PASS oversized query count: {oversizedCount.InputTokenCount} > {oversizedCount.QueryMaxTokens}");
 }
+
+var overrideWords = 1400;
+var upwardOverrideVerified = false;
+while (overrideWords >= 200)
+{
+    var candidate = string.Join(' ', Enumerable.Repeat("backup", overrideWords));
+    var defaultCount = await embeddings.CountQueryTokensAsync(candidate);
+    if (defaultCount.InputTokenCount > defaultCount.QueryMaxTokens &&
+        (defaultCount.ModelMaxTokens is null || defaultCount.InputTokenCount <= defaultCount.ModelMaxTokens))
+    {
+        var request = new QueryEmbeddingRequestOptions
+        {
+            MaxTokens = defaultCount.InputTokenCount,
+            VectorFormat = EmbeddingVectorFormat.Float16
+        };
+        var overrideCount = await embeddings.CountQueryTokensAsync(candidate, request);
+        if (!overrideCount.Fits)
+            throw new InvalidOperationException("Per-call query override should make a model-supported query fit.");
+        var overrideEmbedding = await embeddings.EmbedQueryAsync(candidate, request);
+        if (overrideEmbedding.Vector.Format != EmbeddingVectorFormat.Float16)
+            throw new InvalidOperationException("Query request options should combine token-limit and vector-format overrides.");
+        upwardOverrideVerified = true;
+        Console.WriteLine($"PASS upward per-call query limit override: {defaultCount.QueryMaxTokens} -> {overrideCount.QueryMaxTokens} tokens.");
+        break;
+    }
+    overrideWords -= 100;
+}
+if (!upwardOverrideVerified)
+    Console.WriteLine("INFO loaded model does not expose headroom above the configured 1024-token query default; downward override behavior was still verified.");
 
 var pages = new[]
 {
@@ -110,13 +168,14 @@ foreach (var testCase in cases)
     Console.WriteLine($"PASS {testCase.ExpectedTitle}: {results[0].Score:P1} - {testCase.Query}");
 }
 
-var concurrentTasks = Enumerable.Range(0, 8)
+var burstSize = 11;
+var concurrentTasks = Enumerable.Range(0, burstSize)
     .Select(i => embeddings.EmbedQueryAsync($"Concurrent embedding request {i}: PostgreSQL backup restore"))
     .ToArray();
 var concurrentResults = await Task.WhenAll(concurrentTasks);
-if (concurrentResults.Length != 8 || concurrentResults.Any(result => result.Vector.Dimensions != 2048))
-    throw new InvalidOperationException("Shared-session concurrent inference smoke test failed.");
-Console.WriteLine("PASS 8 concurrent query embeddings on one ONNX model instance.");
+if (concurrentResults.Length != burstSize || concurrentResults.Any(result => result.Vector.Dimensions != 2048))
+    throw new InvalidOperationException("Concurrent inference/queueing smoke test failed.");
+Console.WriteLine("PASS burst of 11 requests through 8 concurrent slots on one ONNX model instance.");
 
 await host.StopAsync();
 

@@ -49,6 +49,21 @@ public sealed class StructuredTextChunkerTests
     }
 
     [Fact]
+    public void ExactFinalization_ShrinksAndContinuesWhenPlanningUnderestimatesModelTokens()
+    {
+        using var tokenizer = new WhitespaceTokenizer(emptySpecialTokens: 1, nonEmptySpecialTokens: 2);
+        var options = new OnnxTextEmbeddingsOptions();
+        var chunker = new StructuredTextChunker(tokenizer, options);
+        var text = "# Backups\n\none two three four five six seven eight nine ten eleven twelve";
+
+        var chunks = chunker.Chunk(text, 7);
+
+        Assert.True(chunks.Count > 1);
+        Assert.All(chunks, chunk => Assert.True(chunk.ModelInput.TokenCount <= 7));
+        Assert.Equal(text, string.Concat(chunks.Select(chunk => chunk.SourceText)));
+    }
+
+    [Fact]
     public void CodeFenceHeading_IsNotTreatedAsMarkdownHeading()
     {
         using var tokenizer = new WhitespaceTokenizer();
@@ -62,7 +77,9 @@ public sealed class StructuredTextChunkerTests
         Assert.Empty(chunks[0].HeadingPath);
     }
 
-    private sealed class WhitespaceTokenizer : IEmbeddingTokenizer
+    private sealed class WhitespaceTokenizer(
+        int emptySpecialTokens = 1,
+        int nonEmptySpecialTokens = 1) : IEmbeddingTokenizer
     {
         public TokenizedSource TokenizeSource(string text)
         {
@@ -84,12 +101,18 @@ public sealed class StructuredTextChunkerTests
         public TokenizedModelInput EncodeModelInput(string text)
         {
             var source = TokenizeSource(text);
-            var ids = source.Ids.Select(x => (long)x).Append(0).ToArray();
+            var specialTokens = text.Length == 0 ? emptySpecialTokens : nonEmptySpecialTokens;
+            var ids = source.Ids.Select(x => (long)x)
+                .Concat(Enumerable.Repeat(0L, specialTokens))
+                .ToArray();
             return new TokenizedModelInput(ids, Enumerable.Repeat(1L, ids.Length).ToArray(), null);
         }
 
         public int CountSourceTokens(string text) => TokenizeSource(text).Count;
-        public int CountModelInputTokens(string text) => CountSourceTokens(text) + 1;
+
+        public int CountModelInputTokens(string text) =>
+            CountSourceTokens(text) + (text.Length == 0 ? emptySpecialTokens : nonEmptySpecialTokens);
+
         public void Dispose() { }
     }
 }
