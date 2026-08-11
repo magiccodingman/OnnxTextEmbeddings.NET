@@ -150,9 +150,9 @@ internal sealed class InferenceWorkerPool : IAsyncDisposable
         var output = session.OutputMetadata.Values.FirstOrDefault();
         if (output is null) return null;
         var dimensions = output.Dimensions;
-        if (dimensions.Count >= 2 && dimensions[^1] > 0)
+        if (dimensions.Length >= 2 && dimensions[^1] > 0)
             return dimensions[^1];
-        if (dimensions.Count == 1 && dimensions[0] > 0)
+        if (dimensions.Length == 1 && dimensions[0] > 0)
             return dimensions[0];
         return null;
     }

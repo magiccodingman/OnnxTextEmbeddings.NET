@@ -121,7 +121,7 @@ internal sealed class HuggingFaceEmbeddingTokenizer : IEmbeddingTokenizer
 
     private static int[] BuildUtf8ByteToUtf16Map(string text)
     {
-        var byteCount = Encoding.UTF8.GetByteCount(text);
+        var byteCount = System.Text.Encoding.UTF8.GetByteCount(text);
         var map = new int[byteCount + 1];
         var utf16 = 0;
         var utf8 = 0;
