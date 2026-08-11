@@ -165,6 +165,58 @@ EmbeddingVector smaller = fp32.ConvertTo(EmbeddingVectorFormat.Int8);
 
 Expanding a lower-precision vector back to FP32 changes its representation; it cannot restore fidelity already discarded by quantization.
 
+## Combine many chunk embeddings into one
+
+Keeping the original chunk array is the preferred representation for semantic retrieval. When a consumer explicitly requires exactly one vector, the returned `IReadOnlyList<TextEmbedding>` can be mathematically compressed:
+
+```csharp
+var chunks = await embeddingService.EmbedDocumentAsync(longText);
+var single = chunks.CombineToSingle();
+```
+
+For multiple chunks, the default `SemanticCoverage-v1` profile performs full-dimensional FP32 semantic aggregation while giving highly repetitive semantic regions diminishing additional influence. It uses persisted source token ranges to avoid double-counting overlap and returns diagnostics such as `AggregationCoherence` and `MinimumSourceSimilarity`.
+
+Aggregation, dimension reduction, and numeric conversion are separate stages. A caller can request all three in one operation:
+
+```csharp
+var single = chunks.CombineToSingle(new SingleEmbeddingOptions
+{
+    OutputDimensions = 512,
+    OutputFormat = EmbeddingVectorFormat.Int8
+});
+```
+
+That means:
+
+```text
+chunk vectors
+   ↓
+FP32 SemanticCoverage-v1 at full dimensions
+   ↓
+deterministic SRHT-v1 → 512
+   ↓
+normalize
+   ↓
+INT8
+```
+
+Dimension expansion is never allowed. A 2048-dimensional supplied representation cannot be turned into a meaningful 4096-dimensional embedding.
+
+Reduced vectors occupy a new deterministic embedding space, so queries must receive the same transform:
+
+```csharp
+var query = await embeddingService.EmbedQueryAsync("database restore");
+var reducedQuery = query.ReduceDimensions(512);
+
+var cosine = EmbeddingVectorMath.CosineSimilarity(
+    reducedQuery.Vector,
+    single.Vector);
+```
+
+The reduced document/query fingerprints match only when the same base space, reduction profile, source dimensions, and output dimensions are used.
+
+See [Single-embedding aggregation](docs/single-embedding.md) and [Dimension reduction](docs/dimension-reduction.md).
+
 ## Configuration defaults
 
 ```text
@@ -188,7 +240,7 @@ Scoring profile               DefaultV1
 
 ## Persistence
 
-The core package owns no database. Store `TextEmbedding` records wherever the application already stores data: memory, SQLite BLOBs, SQL Server `VARBINARY`, PostgreSQL `BYTEA`, JSON/files, or pgvector through the optional adapter.
+The core package owns no database. Store `TextEmbedding` or `SingleEmbedding` records wherever the application already stores data: memory, SQLite BLOBs, SQL Server `VARBINARY`, PostgreSQL `BYTEA`, JSON/files, or pgvector through the optional adapter.
 
 ## Documentation
 
@@ -197,6 +249,8 @@ The core package owns no database. Store `TextEmbedding` records wherever the ap
 - [Configuration](docs/configuration.md)
 - [Concurrency, load balancing, and recovery](docs/concurrency.md)
 - [Vector formats and conversion](docs/vector-formats.md)
+- [Single-embedding aggregation](docs/single-embedding.md)
+- [Dimension reduction](docs/dimension-reduction.md)
 - [Model sources](docs/model-sources.md)
 - [HTTP model manifest](docs/model-manifest.md)
 - [Model cache and updates](docs/model-cache.md)
