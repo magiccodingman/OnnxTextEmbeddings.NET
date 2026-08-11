@@ -10,7 +10,7 @@ dotnet add package OnnxTextEmbeddings.NET
 builder.Services.AddOnnxTextEmbeddings();
 ```
 
-The default registration uses Jasper INT8 on CPU, **one model instance with 16 threads and up to 8 concurrent inference calls**, 1024-token document chunks, a 1024-token query ceiling, and FP32 returned vectors for maximum interoperability.
+The default registration uses Jasper INT8 on CPU, **one model instance with 16 threads and up to 5 automatic concurrent inference calls**, 1024-token document chunks, a 1024-token query ceiling, and FP32 returned vectors for maximum interoperability.
 
 For applications that persist many embeddings, INT8 is the recommended compact default:
 
@@ -33,33 +33,33 @@ var embeddings = await embeddingService.EmbedDocumentAsync(markdown); // FP32 by
 
 A short document yields one embedding. Larger documents yield several `TextEmbedding` records with exact source ranges, token ranges, chunk index/count, heading path, historical token capacity, model revision, and embedding-space fingerprint.
 
-Choose a different return representation for one call without changing the global default:
+Choose token ceiling and return representation for one call without changing the global defaults:
 
 ```csharp
-var int8 = await embeddingService.EmbedDocumentAsync(markdown, EmbeddingVectorFormat.Int8);
-var int4 = await embeddingService.EmbedDocumentAsync(markdown, EmbeddingVectorFormat.Int4);
+var compact = await embeddingService.EmbedDocumentAsync(
+    markdown,
+    new EmbeddingRequestOptions
+    {
+        MaxTokens = 512,
+        VectorFormat = EmbeddingVectorFormat.Int8
+    });
 ```
 
-The built-in service encodes that requested format directly from the original FP32 ONNX output.
+The built-in service chunks using the requested limit and encodes the requested format directly from the original FP32 ONNX output. A per-call document limit cannot exceed the loaded model's hard maximum.
 
 ## 4. Count and embed a query
 
 A query is always one vector. Check its token budget without exception-driven validation:
 
 ```csharp
-var count = await embeddingService.CountQueryTokensAsync(userQuery);
+var request = new QueryEmbeddingRequestOptions { MaxTokens = 2048 };
+var count = await embeddingService.CountQueryTokensAsync(userQuery, request);
 if (!count.Fits) return;
 
-var query = await embeddingService.EmbedQueryAsync(userQuery);
+var query = await embeddingService.EmbedQueryAsync(userQuery, request);
 ```
 
-Per-call query formats are supported too:
-
-```csharp
-var compactQuery = await embeddingService.EmbedQueryAsync(userQuery, EmbeddingVectorFormat.Int8);
-```
-
-`EmbedQueryAsync` still throws `QueryTokenLimitExceededException` if an oversized query is submitted directly; it never silently truncates or chunks it.
+A query request can raise or lower the application default ceiling, but never bypasses the model's actual maximum. It never silently truncates or chunks the query.
 
 ## 5. Convert existing FP32 vectors
 
@@ -86,7 +86,9 @@ var results = await semanticSearch.SearchAsync(
 
 ## 7. Tune concurrency only if needed
 
-Defaults already allow eight simultaneous inference calls against the one model instance. See [concurrency.md](concurrency.md) before increasing `ModelInstanceCount`; an extra instance means an extra ONNX model/session in memory.
+With 16 threads/model, automatic concurrency is **5 for the built-in Jasper INT8 preset** and **4 for Jasper INT4, Jasper FP32, and custom models**. Explicit `ConcurrentRequestsPerModel` values are still honored.
+
+If benchmarks justify multiple model copies, set `ModelInstanceCount > 1`. Requests are routed to the healthy instance with the fewest active requests, and a failed instance is removed from rotation while a fresh session is created. See [concurrency.md](concurrency.md).
 
 ## 8. Persist embeddings
 
