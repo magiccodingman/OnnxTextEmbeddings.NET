@@ -15,7 +15,9 @@ builder.Services.AddOnnxTextEmbeddings(options =>
 
     options.Chunking.ChunkOverlapTokens = 0;
     options.Chunking.RepeatHeadingContext = true;
-    options.Vectors.DocumentFormat = EmbeddingVectorFormat.Int8;
+
+    // Float32 is the interoperability-first default. INT8 is recommended for compact storage.
+    options.Vectors.DocumentFormat = EmbeddingVectorFormat.Float32;
     options.Vectors.QueryFormat = EmbeddingVectorFormat.Float32;
 });
 ```
@@ -61,7 +63,17 @@ Overlap defaults to zero. If enabled, continuation chunks reuse up to the config
 
 ## Vector formats
 
-Model precision and stored-vector format are independent. `EmbeddingVectorFormat.Int4` is packed symmetric per-vector quantization; INT8 is the default document representation. Queries default to FP32.
+Both document and query return formats default to FP32 for maximum interoperability. Applications that persist many vectors should strongly consider INT8 for its roughly 4x smaller vector payload.
+
+The configured values are only defaults. Any embedding call can select a format dynamically:
+
+```csharp
+var compact = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Int8);
+var tiny = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Int4);
+var full = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Float32);
+```
+
+See [vector-formats.md](vector-formats.md).
 
 ## Search
 

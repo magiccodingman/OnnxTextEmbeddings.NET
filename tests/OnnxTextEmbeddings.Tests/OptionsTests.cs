@@ -15,7 +15,7 @@ public sealed class OptionsTests
         Assert.Equal(0, options.Inference.ConcurrentRequestsPerModel);
         Assert.Equal(8, resolved.ConcurrentRequestsPerModel);
         Assert.Equal(8, resolved.TotalConcurrentRequests);
-        Assert.Equal(EmbeddingVectorFormat.Int8, options.Vectors.DocumentFormat);
+        Assert.Equal(EmbeddingVectorFormat.Float32, options.Vectors.DocumentFormat);
         Assert.Equal(EmbeddingVectorFormat.Float32, options.Vectors.QueryFormat);
         Assert.Equal(JasperModelPresets.Int8Repository, options.Model.RepositoryId);
     }

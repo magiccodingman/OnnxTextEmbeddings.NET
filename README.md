@@ -53,47 +53,14 @@ QueryEmbedding query = await embeddingService.EmbedQueryAsync("postgres backup r
 If the final query input exceeds `QueryMaxTokens`, `EmbedQueryAsync` throws `QueryTokenLimitExceededException`. Applications that want to validate first can count without triggering that limit error:
 
 ```csharp
-int sourceTokens = await embeddingService.CountTokensAsync(userText);
-QueryTokenCount queryCount = await embeddingService.CountQueryTokensAsync(userText);
-
+var queryCount = await embeddingService.CountQueryTokensAsync(userText);
 if (queryCount.Fits)
-{
-    var query = await embeddingService.EmbedQueryAsync(userText);
-}
+    query = await embeddingService.EmbedQueryAsync(userText);
 ```
-
-`QueryTokenCount` reports source tokens, actual model-input tokens (including tokenizer-added special tokens), the configured query maximum, the model maximum when known, and `Fits`.
 
 ## Concurrent CPU inference without duplicate model copies
 
-A single ONNX Runtime session can execute multiple `Run()` calls concurrently, so request concurrency does **not** require loading another copy of the model.
-
-Defaults:
-
-```text
-ModelInstanceCount             1
-ThreadsPerModel               16
-ConcurrentRequestsPerModel    Auto → min(ThreadsPerModel / 2, 8)
-Resolved default concurrency   8 requests
-QueueCapacity                256
-```
-
-So the normal configuration keeps **one Jasper model in memory** while allowing up to **8 inference requests in flight against that model instance**. Each request still has its own normal 1024-token default limit; concurrency does not combine or divide token budgets.
-
-Tune explicitly when desired:
-
-```csharp
-builder.Services.AddOnnxTextEmbeddings(options =>
-{
-    options.Inference.ModelInstanceCount = 1;
-    options.Inference.ThreadsPerModel = 16;
-    options.Inference.ConcurrentRequestsPerModel = 8;
-});
-```
-
-Automatic concurrency is capped at 8. Explicit positive values are honored, but **8 concurrent requests per model is the recommended practical maximum**; benchmarks showed little or no additional benefit beyond that point. Only increase `ModelInstanceCount` when you intentionally want another independent ONNX session/model copy in memory.
-
-See [Concurrency and threading](docs/concurrency.md).
+Defaults keep **one model copy in memory**, use 16 threads, and allow up to 8 simultaneous inference calls against that one ONNX session. See [Concurrency and threading](docs/concurrency.md).
 
 ## Default model
 
@@ -103,37 +70,57 @@ The default is the CPU-friendly Jasper dynamic INT8 ONNX model:
 - `magiccodingman/Jasper-Token-Compression-600M-ONNX-INT4`
 - `magiccodingman/Jasper-Token-Compression-600M-ONNX-FP32`
 
-Switch model precision without changing the rest of the application:
+Model precision and returned-vector precision are independent.
 
-```csharp
-builder.Services.AddOnnxTextEmbeddings(options =>
-{
-    options.Model.UseJasper(JasperModelPrecision.Int4);
-});
-```
+## Vector formats: FP32 by default, INT8 recommended for compact storage
 
-Model precision and **stored-vector precision are independent**.
+Both document and query embeddings now return **FP32 by default** for maximum compatibility with databases, vector libraries, and external integrations.
 
-## Compact vector storage
-
-Document embeddings default to INT8 storage. Supported formats are:
+Supported return/storage representations:
 
 | Format | Approx. payload per 2048-d vector | Notes |
 |---|---:|---|
-| INT4 | 1 KiB | Packed two signed values per byte |
-| INT8 | 2 KiB | Default document storage |
-| FP16 | 4 KiB | Standard IEEE half precision |
-| FP32 | 8 KiB | Maximum fidelity |
+| INT4 | 1 KiB | Packed aggressive quantization |
+| INT8 | 2 KiB | Recommended compact storage option |
+| FP16 | 4 KiB | Half precision |
+| FP32 | 8 KiB | Default; maximum interoperability |
+
+Make INT8 your application-wide document default when compact storage matters:
 
 ```csharp
 builder.Services.AddOnnxTextEmbeddings(options =>
 {
-    options.Vectors.DocumentFormat = EmbeddingVectorFormat.Int4;
-    options.Vectors.QueryFormat = EmbeddingVectorFormat.Float32;
+    options.Vectors.DocumentFormat = EmbeddingVectorFormat.Int8;
 });
 ```
 
-Each persisted vector carries encoding version, dimensions, format, and quantization metadata. `TextEmbedding` also carries the embedding-space fingerprint, source revision, source ranges, token counts, capacity, and chunk metadata.
+Or choose dynamically for a single call without changing the global default:
+
+```csharp
+var tiny = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Int4);
+var compact = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Int8);
+var half = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Float16);
+var full = await embeddingService.EmbedDocumentAsync(text, EmbeddingVectorFormat.Float32);
+
+var compactQuery = await embeddingService.EmbedQueryAsync(queryText, EmbeddingVectorFormat.Int8);
+```
+
+Per-call selection is applied directly to the original FP32 ONNX result, so requesting FP32 never reconstructs an already-quantized default.
+
+### Convert vectors you already have
+
+```csharp
+EmbeddingVector fp32 = EmbeddingVector.FromFloat32(values); // preserves FP32
+EmbeddingVector fp16 = EmbeddingVector.FromFloat32(values, EmbeddingVectorFormat.Float16);
+EmbeddingVector int8 = EmbeddingVector.FromFloat32(values, EmbeddingVectorFormat.Int8);
+EmbeddingVector int4 = EmbeddingVector.FromFloat32(values, EmbeddingVectorFormat.Int4);
+
+EmbeddingVector smaller = fp32.ConvertTo(EmbeddingVectorFormat.Int8);
+```
+
+A lower-precision vector can be dequantized into an FP32 representation for compatibility, but doing so cannot restore fidelity that was already discarded during quantization.
+
+See [Vector formats and conversion](docs/vector-formats.md).
 
 ## Weighted semantic fields
 
@@ -161,7 +148,7 @@ ConcurrentRequestsPerModel    Auto (8 with default threads)
 QueueCapacity                 256
 ChunkOverlapTokens            0
 RepeatHeadingContext          true
-Document vector format        INT8
+Document vector format        FP32
 Query vector format           FP32
 Scoring profile               DefaultV1
 ```
@@ -172,22 +159,9 @@ The first request (or hosted-service warmup) resolves the model, downloads runti
 
 Updates are transactional. A failed candidate does not replace a working runtime. When a successful update is activated, old sessions are disposed before old snapshot files are removed.
 
-```csharp
-bool changed = await embeddingService.UpdateModelAsync();
-```
-
-Persisted embeddings from a different embedding-space fingerprint are rejected during search rather than producing meaningless cosine scores.
-
 ## Persistence
 
-The core package owns no database. Store `TextEmbedding` records wherever the application already stores data:
-
-- memory
-- SQLite BLOBs
-- SQL Server `VARBINARY`
-- PostgreSQL `BYTEA`
-- JSON/files
-- pgvector `vector`/`halfvec` through the optional adapter
+The core package owns no database. Store `TextEmbedding` records wherever the application already stores data: memory, SQLite BLOBs, SQL Server `VARBINARY`, PostgreSQL `BYTEA`, JSON/files, or pgvector through the optional adapter.
 
 ## Documentation
 
@@ -195,6 +169,7 @@ The core package owns no database. Store `TextEmbedding` records wherever the ap
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
 - [Concurrency and threading](docs/concurrency.md)
+- [Vector formats and conversion](docs/vector-formats.md)
 - [Model sources](docs/model-sources.md)
 - [HTTP model manifest](docs/model-manifest.md)
 - [Model cache and updates](docs/model-cache.md)

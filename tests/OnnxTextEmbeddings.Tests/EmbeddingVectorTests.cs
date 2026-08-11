@@ -19,6 +19,25 @@ public sealed class EmbeddingVectorTests
     }
 
     [Fact]
+    public void FromFloat32WithoutFormatPreservesFloat32()
+    {
+        var vector = EmbeddingVector.FromFloat32(Values);
+
+        Assert.Equal(EmbeddingVectorFormat.Float32, vector.Format);
+        Assert.Equal(Values.Length * sizeof(float), vector.Data.Length);
+    }
+
+    [Fact]
+    public void ExplicitDownConversionSupportsEveryCompactFormat()
+    {
+        var fp32 = EmbeddingVector.FromFloat32(Values);
+
+        Assert.Equal(EmbeddingVectorFormat.Float16, fp32.ConvertTo(EmbeddingVectorFormat.Float16).Format);
+        Assert.Equal(EmbeddingVectorFormat.Int8, fp32.ConvertTo(EmbeddingVectorFormat.Int8).Format);
+        Assert.Equal(EmbeddingVectorFormat.Int4, fp32.ConvertTo(EmbeddingVectorFormat.Int4).Format);
+    }
+
+    [Fact]
     public void Int4PacksTwoDimensionsPerByte()
     {
         var vector = EmbeddingVector.FromFloat32(Values, EmbeddingVectorFormat.Int4);

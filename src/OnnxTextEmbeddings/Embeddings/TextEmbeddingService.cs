@@ -44,6 +44,39 @@ public interface ITextEmbeddingService : IAsyncDisposable
     Task<IReadOnlyList<TextEmbedding>> EmbedAsync(string text, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(string text, CancellationToken cancellationToken = default);
     Task<QueryEmbedding> EmbedQueryAsync(string query, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Embeds text using the requested return format for this call. Implementations may override this to encode
+    /// directly from their native inference output. The default implementation converts the normal returned record.
+    /// </summary>
+    async Task<IReadOnlyList<TextEmbedding>> EmbedAsync(
+        string text,
+        EmbeddingVectorFormat format,
+        CancellationToken cancellationToken = default)
+    {
+        var embeddings = await EmbedAsync(text, cancellationToken).ConfigureAwait(false);
+        return embeddings.Select(item => item with { Vector = item.Vector.ConvertTo(format) }).ToArray();
+    }
+
+    /// <summary>Embeds a document using the requested return format for this call.</summary>
+    async Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
+        string text,
+        EmbeddingVectorFormat format,
+        CancellationToken cancellationToken = default)
+    {
+        var embeddings = await EmbedDocumentAsync(text, cancellationToken).ConfigureAwait(false);
+        return embeddings.Select(item => item with { Vector = item.Vector.ConvertTo(format) }).ToArray();
+    }
+
+    /// <summary>Embeds a single query vector using the requested return format for this call.</summary>
+    async Task<QueryEmbedding> EmbedQueryAsync(
+        string query,
+        EmbeddingVectorFormat format,
+        CancellationToken cancellationToken = default)
+    {
+        var embedding = await EmbedQueryAsync(query, cancellationToken).ConfigureAwait(false);
+        return embedding with { Vector = embedding.Vector.ConvertTo(format) };
+    }
 }
 
 internal sealed class TextEmbeddingService(
@@ -209,9 +242,24 @@ internal sealed class TextEmbeddingService(
 
     public Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
         string text,
-        CancellationToken cancellationToken = default) => EmbedAsync(text, cancellationToken);
+        CancellationToken cancellationToken = default) =>
+        EmbedAsync(text, options.Vectors.DocumentFormat, cancellationToken);
 
-    public async Task<IReadOnlyList<TextEmbedding>> EmbedAsync(string text, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
+        string text,
+        EmbeddingVectorFormat format,
+        CancellationToken cancellationToken = default) =>
+        EmbedAsync(text, format, cancellationToken);
+
+    public Task<IReadOnlyList<TextEmbedding>> EmbedAsync(
+        string text,
+        CancellationToken cancellationToken = default) =>
+        EmbedAsync(text, options.Vectors.DocumentFormat, cancellationToken);
+
+    public async Task<IReadOnlyList<TextEmbedding>> EmbedAsync(
+        string text,
+        EmbeddingVectorFormat format,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(text);
         await WaitUntilReadyAsync(cancellationToken).ConfigureAwait(false);
@@ -228,7 +276,7 @@ internal sealed class TextEmbeddingService(
             var chunk = chunks[i];
             result[i] = new TextEmbedding
             {
-                Vector = EmbeddingVector.FromFloat32(vectors[i], options.Vectors.DocumentFormat),
+                Vector = EmbeddingVector.FromFloat32(vectors[i], format),
                 Identity = identity,
                 Source = new EmbeddingSource
                 {
@@ -256,7 +304,15 @@ internal sealed class TextEmbeddingService(
         return result;
     }
 
-    public async Task<QueryEmbedding> EmbedQueryAsync(string query, CancellationToken cancellationToken = default)
+    public Task<QueryEmbedding> EmbedQueryAsync(
+        string query,
+        CancellationToken cancellationToken = default) =>
+        EmbedQueryAsync(query, options.Vectors.QueryFormat, cancellationToken);
+
+    public async Task<QueryEmbedding> EmbedQueryAsync(
+        string query,
+        EmbeddingVectorFormat format,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         await WaitUntilReadyAsync(cancellationToken).ConfigureAwait(false);
@@ -267,7 +323,7 @@ internal sealed class TextEmbeddingService(
         var values = await _workers!.RunAsync(input, cancellationToken).ConfigureAwait(false);
         return new QueryEmbedding
         {
-            Vector = EmbeddingVector.FromFloat32(values, options.Vectors.QueryFormat),
+            Vector = EmbeddingVector.FromFloat32(values, format),
             Identity = CreateIdentity(_snapshot!),
             SourceTokenCount = count.SourceTokenCount,
             InputTokenCount = count.InputTokenCount

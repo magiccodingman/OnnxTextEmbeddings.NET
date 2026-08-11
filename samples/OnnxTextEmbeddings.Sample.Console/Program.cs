@@ -26,6 +26,29 @@ if (embeddings.ModelInfo?.Dimensions != 2048)
 if (embeddings.ModelInfo is not { ModelInstanceCount: 1, ThreadsPerModel: 16, ConcurrentRequestsPerModel: 8 })
     throw new InvalidOperationException("Default inference topology should be one model instance, 16 threads, and 8 concurrent requests per model.");
 
+const string formatProbe = "A compact semantic embedding format probe.";
+var defaultDocument = await embeddings.EmbedDocumentAsync(formatProbe);
+if (defaultDocument.Count != 1 || defaultDocument[0].Vector.Format != EmbeddingVectorFormat.Float32)
+    throw new InvalidOperationException("Default document embeddings should return Float32.");
+
+foreach (var format in new[]
+         {
+             EmbeddingVectorFormat.Int4,
+             EmbeddingVectorFormat.Int8,
+             EmbeddingVectorFormat.Float16,
+             EmbeddingVectorFormat.Float32
+         })
+{
+    var document = await embeddings.EmbedDocumentAsync(formatProbe, format);
+    if (document.Count != 1 || document[0].Vector.Format != format)
+        throw new InvalidOperationException($"Per-call document format override failed for {format}.");
+
+    var query = await embeddings.EmbedQueryAsync("semantic format probe", format);
+    if (query.Vector.Format != format)
+        throw new InvalidOperationException($"Per-call query format override failed for {format}.");
+}
+Console.WriteLine("PASS Float32 defaults and per-call INT4/INT8/FP16/FP32 return formats.");
+
 const string normalQuery = "How do I restore my PostgreSQL database backup?";
 var sourceTokenCount = await embeddings.CountTokensAsync(normalQuery);
 var queryTokenCount = await embeddings.CountQueryTokensAsync(normalQuery);
@@ -87,7 +110,6 @@ foreach (var testCase in cases)
     Console.WriteLine($"PASS {testCase.ExpectedTitle}: {results[0].Score:P1} - {testCase.Query}");
 }
 
-// Prove the default topology can execute eight calls concurrently while keeping one model instance.
 var concurrentTasks = Enumerable.Range(0, 8)
     .Select(i => embeddings.EmbedQueryAsync($"Concurrent embedding request {i}: PostgreSQL backup restore"))
     .ToArray();

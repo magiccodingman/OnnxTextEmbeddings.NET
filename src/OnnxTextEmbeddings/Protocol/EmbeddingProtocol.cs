@@ -69,14 +69,26 @@ public sealed record EmbeddingVector
     public required byte[] Data { get; init; }
     public EmbeddingQuantizationInfo? Quantization { get; init; }
 
+    /// <summary>
+    /// Converts this vector to another representation. Expanding a lossy INT4, INT8, or Float16 vector to a
+    /// higher-precision representation does not restore precision that was already discarded.
+    /// </summary>
     public EmbeddingVector ConvertTo(EmbeddingVectorFormat format) =>
         EmbeddingVectorMath.Convert(this, format);
 
+    /// <summary>
+    /// Returns this vector as float32 values. For quantized/lower-precision vectors these values are reconstructed
+    /// from the stored representation and are not the original pre-quantization float32 values.
+    /// </summary>
     public float[] ToFloat32() => EmbeddingVectorMath.ToFloat32(this);
 
+    /// <summary>
+    /// Creates an embedding vector from float32 values. With no explicit format, the input is preserved as Float32.
+    /// Specify Float16, Int8, or Int4 to intentionally create a smaller lossy representation.
+    /// </summary>
     public static EmbeddingVector FromFloat32(
         ReadOnlySpan<float> values,
-        EmbeddingVectorFormat format = EmbeddingVectorFormat.Int8) =>
+        EmbeddingVectorFormat format = EmbeddingVectorFormat.Float32) =>
         EmbeddingVectorMath.FromFloat32(values, format);
 }
 
