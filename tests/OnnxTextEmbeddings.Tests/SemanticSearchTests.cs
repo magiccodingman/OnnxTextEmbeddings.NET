@@ -20,7 +20,7 @@ public sealed class SemanticSearchTests
             new Item("short", [Embedding(0.95f, 100, 1000)]),
             new Item("long", [Embedding(0.93f, 800, 1000)])
         };
-        var results = await search.SearchAsync(_query, items, x => x.Embeddings);
+        var results = await search.SearchAsync(_query, items, x => x.Embeddings, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("long", results[0].Item.Name);
     }
 
@@ -33,7 +33,7 @@ public sealed class SemanticSearchTests
             new Item("short", [Embedding(0.99f, 100, 1000)]),
             new Item("long", [Embedding(0.93f, 800, 1000)])
         };
-        var results = await search.SearchAsync(_query, items, x => x.Embeddings);
+        var results = await search.SearchAsync(_query, items, x => x.Embeddings, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("short", results[0].Item.Name);
     }
 
@@ -46,7 +46,7 @@ public sealed class SemanticSearchTests
             new Item("large", [Embedding(0.94f), Embedding(0.20f), Embedding(0.18f), Embedding(0.10f)]),
             new Item("small", [Embedding(0.86f)])
         };
-        var results = await search.SearchAsync(_query, items, x => x.Embeddings);
+        var results = await search.SearchAsync(_query, items, x => x.Embeddings, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("large", results[0].Item.Name);
     }
 
@@ -59,7 +59,7 @@ public sealed class SemanticSearchTests
             new Item("isolated", [Embedding(0.94f)]),
             new Item("supported", [Embedding(0.91f), Embedding(0.90f), Embedding(0.89f)])
         };
-        var results = await search.SearchAsync(_query, items, x => x.Embeddings);
+        var results = await search.SearchAsync(_query, items, x => x.Embeddings, cancellationToken: TestContext.Current.CancellationToken);
         var supported = results.Single(x => x.Item.Name == "supported");
         Assert.True(supported.Score > supported.BestMatch.AdjustedSimilarity);
         Assert.Equal("isolated", results[0].Item.Name);
@@ -71,7 +71,7 @@ public sealed class SemanticSearchTests
         var search = CreateSearch();
         var weak = Enumerable.Range(0, 20).Select(_ => Embedding(0.55f)).ToArray();
         var items = new[] { new Item("excellent", [Embedding(0.90f)]), new Item("weak", weak) };
-        var results = await search.SearchAsync(_query, items, x => x.Embeddings);
+        var results = await search.SearchAsync(_query, items, x => x.Embeddings, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("excellent", results[0].Item.Name);
     }
 
@@ -84,7 +84,33 @@ public sealed class SemanticSearchTests
             Identity = Identity() with { EmbeddingSpaceFingerprint = "other" }
         };
         await Assert.ThrowsAsync<EmbeddingSpaceMismatchException>(async () =>
-            await search.SearchAsync(_query, new[] { new Item("bad", [bad]) }, x => x.Embeddings));
+            await search.SearchAsync(
+                _query,
+                new[] { new Item("bad", [bad]) },
+                x => x.Embeddings,
+                cancellationToken: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task WeightedTitleCanBreakBodyTie()
+    {
+        var search = CreateSearch();
+        var first = new FieldItem("title-match", [Embedding(0.90f)], [Embedding(0.82f)]);
+        var second = new FieldItem("body-only", [Embedding(0.35f)], [Embedding(0.90f)]);
+
+        var results = await search.SearchFieldsAsync(
+            _query,
+            new[] { first, second },
+            item =>
+            [
+                SemanticField.Create("title", item.Title, 2f),
+                SemanticField.Create("body", item.Body, 1f)
+            ],
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal("title-match", results[0].Item.Name);
+        Assert.Equal(SemanticScoringProfiles.DefaultV1, results[0].Scoring.ProfileId);
+        Assert.Equal(1, results[0].Scoring.ProfileVersion);
     }
 
     private static ISemanticSearch CreateSearch()
@@ -121,6 +147,7 @@ public sealed class SemanticSearchTests
     };
 
     private sealed record Item(string Name, IReadOnlyList<TextEmbedding> Embeddings);
+    private sealed record FieldItem(string Name, IReadOnlyList<TextEmbedding> Title, IReadOnlyList<TextEmbedding> Body);
 
     private sealed class NoopEmbeddingService : ITextEmbeddingService
     {
