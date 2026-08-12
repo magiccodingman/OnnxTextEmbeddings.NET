@@ -1,0 +1,19 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
+    <Project Path="src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OnnxTextEmbeddings.Tests/OnnxTextEmbeddings.Tests.csproj" />
+    <Project Path="tests/OnnxTextEmbeddings.PostgresIntegration/OnnxTextEmbeddings.PostgresIntegration.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/OnnxTextEmbeddings.Sample.Console/OnnxTextEmbeddings.Sample.Console.csproj" />
+    <Project Path="samples/OnnxTextEmbeddings.Sample.AspNetCore/OnnxTextEmbeddings.Sample.AspNetCore.csproj" />
+    <Project Path="samples/OnnxTextEmbeddings.Sample.Sqlite/OnnxTextEmbeddings.Sample.Sqlite.csproj" />
+    <Project Path="samples/OnnxTextEmbeddings.Sample.Postgres/OnnxTextEmbeddings.Sample.Postgres.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/OnnxTextEmbeddings.Benchmarks/OnnxTextEmbeddings.Benchmarks.csproj" />
+  </Folder>
+</Solution>

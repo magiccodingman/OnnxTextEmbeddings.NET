@@ -1,0 +1,34 @@
+name: Jasper model integration
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  jasper-smoke-test:
+    name: Jasper ${{ matrix.precision }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        precision: [Int8, Int4, Float32]
+
+    env:
+      JASPER_PRECISION: ${{ matrix.precision }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run end-to-end sample
+        run: dotnet run --project samples/OnnxTextEmbeddings.Sample.Console/OnnxTextEmbeddings.Sample.Console.csproj --configuration Release
