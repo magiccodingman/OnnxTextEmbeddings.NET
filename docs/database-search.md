@@ -1,99 +1,106 @@
-# Database-native semantic search
+# Database-native semantic, lexical, and hybrid search
 
-OnnxTextEmbeddings.NET keeps one semantic ranking implementation while allowing databases with native vector support to perform broad candidate retrieval.
+OnnxTextEmbeddings.NET keeps search meaning in core while allowing PostgreSQL, SQLite, and SQL Server/Azure SQL to perform broad retrieval with their native vector and full-text engines.
 
 ```text
-QueryEmbedding
-      ↓
-relational filters + embedding-space fingerprint
-      ↓
-database-native cosine / KNN
-      ↓
-bounded direct-chunk candidates
-      ↓
-core DefaultV1 reranking
-      ↓
-SemanticSearchResult<TKey>
+portable + provider-specific prefilters
+                  ↓
+        ┌─────────┴─────────┐
+        │                   │
+native semantic       native lexical
+   retrieval             retrieval
+        │                   │
+DefaultV1 item rank     provider rank
+        └─────────┬─────────┘
+                  ↓
+          reciprocal-rank fusion
+                  ↓
+          optional post-filter
+                  ↓
+               Top N
 ```
 
-The database answers **which chunks plausibly matter**. Core answers **how chunk length confidence, strongest evidence, bounded supporting evidence, and semantic-field weights combine into the final item score**.
+Semantic database retrieval still follows the original division of responsibility: the database answers **which chunks plausibly matter**, while core `DefaultV1` decides how chunk-length confidence, strongest evidence, bounded supporting evidence, and semantic-field weights combine into item scores.
 
-This prevents PostgreSQL, SQLite, and SQL Server from each acquiring their own subtly different implementation of `DefaultV1`.
+Lexical ranking is deliberately provider-native. Only SQLite and the in-memory engine are described as BM25; PostgreSQL and SQL Server use their own native full-text relevance systems.
 
-## Official search integrations
+## Official integrations
 
-| Backend | Package | Candidate search |
-|---|---|---|
-| In memory | `OnnxTextEmbeddings.NET` | Managed cosine + DefaultV1 |
-| PostgreSQL | `OnnxTextEmbeddings.NET.PgVector` | pgvector cosine/KNN |
-| SQLite | `OnnxTextEmbeddings.NET.SqliteVec` | sqlite-vec `vec0` KNN |
-| SQL Server 2025 / Azure SQL | `OnnxTextEmbeddings.NET.SqlServer` | `VECTOR_DISTANCE` and optional approximate vector search |
+| Backend | Package | Semantic | Lexical |
+|---|---|---|---|
+| In memory | `OnnxTextEmbeddings.NET` | managed cosine + DefaultV1 | `BM25-v1` |
+| PostgreSQL | `OnnxTextEmbeddings.NET.PgVector` | pgvector | `tsvector` + `ts_rank_cd`/`ts_rank` |
+| SQLite | `OnnxTextEmbeddings.NET.SqliteVec` | sqlite-vec `vec0` | FTS5 `bm25()` |
+| SQL Server 2025 / Azure SQL | `OnnxTextEmbeddings.NET.SqlServer` | `VECTOR_DISTANCE` / optional vector search | `FREETEXTTABLE` / `CONTAINSTABLE` |
 
-Plain SQLite remains a perfectly valid persistence store. It simply is not a separate first-class vector-search provider: applications can deserialize scoped rows and use core in-memory search, while sqlite-vec is the official SQLite-native candidate path.
+Plain SQLite remains valid generic persistence. sqlite-vec is the official SQLite-native vector integration; FTS5 provides its native lexical half.
 
-## Shared candidate protocol
+## Semantic candidate protocol
 
-Database providers normalize native rows into `SemanticCandidate<TKey>` records. A candidate carries:
+Database semantic providers normalize rows into `SemanticCandidate<TKey>` records carrying item key, field name/weight, complete direct `TextEmbedding`, and optional native similarity diagnostics. `ISemanticCandidateReranker` then executes the same DefaultV1 scoring used by in-memory semantic search.
 
-- item key;
-- field name and field weight;
-- the complete direct `TextEmbedding` record;
-- optional native similarity diagnostics.
-
-`ISemanticCandidateReranker` then executes the same DefaultV1 scoring used by normal in-memory search.
-
-`NativeSimilarity` is diagnostic/preselection information. It is not substituted for the canonical final score.
+`NativeSimilarity` is diagnostic/preselection information; it is not substituted for canonical final semantic scoring.
 
 ## Candidate over-fetching
 
-A request for ten final items must not retrieve only ten chunks. Supporting chunks and multiple fields can affect final item ranking.
-
-`DatabaseSemanticSearchOptions` therefore defaults candidate count to:
+A request for ten final items must not retrieve only ten chunks because supporting chunks/multiple fields can affect final item ranking. `DatabaseSemanticSearchOptions` therefore defaults to:
 
 ```text
 max(100, Top × 10)
 ```
 
-Callers can override `CandidateCount` explicitly when recall, database cost, or dataset shape warrants a different value.
+Callers may set `CandidateCount` explicitly. Advanced SearchQuery stages also have their own candidate limits, allowing semantic and lexical retrieval to use different budgets.
+
+## Embedding-space safety
+
+Every official vector provider filters by `EmbeddingSpaceFingerprint` during native candidate retrieval. Equal dimensions are not sufficient compatibility: derived SRHT spaces and unrelated models must never be mixed.
+
+## Portable relational filtering
+
+Database query mappings accept a `SearchFilter` plus a logical-to-physical `FilterColumns` map:
 
 ```csharp
-var options = new DatabaseSemanticSearchOptions
+new PgVectorCandidateQuery
 {
-    Top = 10,
-    CandidateCount = 250
+    // ... vector schema mapping ...
+    Filter = SearchFilter.And(
+        SearchFilter.Equal("TenantId", tenantId),
+        SearchFilter.GreaterThanOrEqual("UpdatedAt", cutoff)),
+    FilterColumns = new Dictionary<string, string>
+    {
+        ["TenantId"] = "tenant_id",
+        ["UpdatedAt"] = "updated_at"
+    }
 };
 ```
 
-Final reranking cannot recover a chunk that the candidate stage never returned. Approximate indexes therefore expose their approximate nature through retrieval diagnostics.
+The provider compiles this filter into parameterized SQL so ordinary tenant/security/status/date predicates stay inside the database before vector/lexical retrieval.
 
-## Fingerprint safety
+The existing `AdditionalWhereSql` + provider-native command callback remains the deliberate escape hatch for predicates outside the portable vocabulary. Raw SQL fragments are trusted application code; dynamic user values belong in parameters.
 
-Every official provider filters by `EmbeddingSpaceFingerprint` during native candidate retrieval.
+## Field restrictions and weights per query
 
-Equal dimensions do not make vectors compatible. A Jasper 512-dimensional `SRHT-v1` vector and some unrelated 512-dimensional vector are different spaces and must never be compared as if they were interchangeable.
+Advanced semantic stages can restrict candidate retrieval to selected logical semantic fields and multiply persisted field weights by query-specific weights before `DefaultV1` reranking.
 
-## Relational filtering
+Lexical stages similarly select/weight logical text fields using the native provider mechanism:
 
-Core deliberately does not invent a cross-database WHERE-clause DSL.
+- PostgreSQL maps logical fields to `tsvector` A/B/C/D labels;
+- SQLite maps them to positional FTS5 `bm25()` weights and column filters;
+- SQL Server searches selected full-text columns separately and rank-fuses them with the caller's field weights.
 
-Each provider accepts its own static `AdditionalWhereSql` fragment and a parameter-configuration callback using that provider's native command type. The SQL fragment is treated as trusted application code; dynamic user input belongs in parameters.
+## Hybrid RRF
 
-This keeps tenant/project/security/date filtering in the database without turning OnnxTextEmbeddings.NET into an ORM.
+Database-native raw scores are intentionally not normalized into a fake common scale. `SearchRankFusion` combines stage ranking positions using Reciprocal Rank Fusion. This makes the same hybrid query meaningful whether one lexical provider returned an FTS5 BM25 value, a PostgreSQL rank, or a SQL Server `RANK`.
+
+See [Lexical, BM25, hybrid, and advanced search](lexical-hybrid-search.md) for the SearchQuery model, filter vocabulary, post-filter semantics, and provider examples.
 
 ## Direct chunk dimensional reduction
 
-Database constraints sometimes require a smaller vector while chunk-level retrieval must remain intact.
-
-Use `TextEmbedding.ReduceDimensions(...)` rather than `CombineToSingle()`:
+Database constraints sometimes require a smaller vector while chunk-level retrieval must remain intact. Use `TextEmbedding.ReduceDimensions(...)`, not `CombineToSingle()`:
 
 ```csharp
-TextEmbedding reduced = chunk.ReduceDimensions(
-    1024,
-    EmbeddingVectorFormat.Float32);
-
-QueryEmbedding reducedQuery = query.ReduceDimensions(1024);
+var reducedChunk = chunk.ReduceDimensions(1024, EmbeddingVectorFormat.Float32);
+var reducedQuery = query.ReduceDimensions(1024);
 ```
 
-The source range, chunk metadata, text, and context remain direct-chunk metadata. Only the vector coordinate space changes, and both document/query identities derive the same deterministic child fingerprint when the same SRHT profile and dimensions are used.
-
-Aggregation is only for consumers that genuinely require one semantic vector for an entire multi-chunk document.
+The direct source/chunk metadata is preserved while both records enter the same deterministic child embedding space.

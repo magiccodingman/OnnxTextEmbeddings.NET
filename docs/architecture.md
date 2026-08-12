@@ -1,152 +1,148 @@
 # Architecture
 
-The core embedding pipeline is:
+The project now composes two reusable infrastructure packages instead of reimplementing their generic machinery.
 
 ```text
-Model source
-   ↓
-transactional cache
-   ↓
-Hugging Face tokenizer + token offsets
-   ↓
-structure-aware chunker / query validation
-   ↓
-bounded global inference queue
-   ↓
-least-loaded healthy-instance scheduler
-   ↓
-1..N managed ONNX model instances
-   ├─ health + active slot accounting
-   ├─ concurrent Run() calls
-   └─ drain / rebuild / generation recovery
-   ↓
-versioned TextEmbedding / QueryEmbedding records
-   ↓
-DefaultV1 semantic search / application persistence
+ModelArtifacts.NET
+  source resolution / download / staging / cache / verification / promotion
+              │
+              ▼
+OnnxTextEmbeddings.NET embedding policy
+  Jasper/custom model selection
+  required files + embedding-space identity
+  tokenizer + chunking + tensor contract + pooling/normalization
+              │
+              ▼
+OnnxModelRuntime.NET
+  InferenceSession hosting / bounded queue / concurrency / scheduling / recovery
+              │
+              ▼
+versioned TextEmbedding / QueryEmbedding
+              │
+       ┌──────┴──────┐
+       │             │
+ semantic search   lexical search
+       │             │
+       └──────┬──────┘
+              ▼
+        optional RRF hybrid
 ```
 
-An optional deterministic post-processing path exists when a consumer explicitly requires one vector:
+The ownership rule is intentionally simple:
+
+- **ModelArtifacts.NET owns files.**
+- **OnnxModelRuntime.NET owns generic ONNX execution orchestration.**
+- **OnnxTextEmbeddings.NET owns what an embedding model means and how search results mean something.**
+- **Database adapters own provider-native retrieval mechanics.**
+
+## Model acquisition ownership
+
+`ModelArtifacts.NET` owns revision resolution, explicit artifact selection, download retries, transfer integrity, staging, cross-process cache locking, candidate snapshots, offline fallback, atomic promotion/discard, and cleanup.
+
+OnnxTextEmbeddings.NET still owns embedding-specific policy: Jasper presets, which model/tokenizer file is required, interpretation of `onnx-text-embeddings.json`, token limits, tokenizer construction, model/tensor validation, and embedding-space identity.
+
+A newly downloaded candidate is not promoted merely because its bytes verified. OnnxTextEmbeddings creates the tokenizer and `OnnxModelRuntime`, runs a real validation inference through the embedding tensor/pooling path, and only then calls `ArtifactManager.PromoteAsync`. A failed candidate can therefore be discarded while the previous known-good snapshot stays current.
+
+`ArtifactFingerprint` and `EmbeddingSpaceFingerprint` remain distinct concepts. The former is generic artifact identity; the latter is the compatibility contract for persisted vectors. The embedding package preserves its historical fingerprint calculation so adopting ModelArtifacts.NET does not silently invalidate existing vectors.
+
+## Tokenization and request preparation
+
+The tokenizer is created once per active model runtime. Source tokenization records offsets so chunks map directly back to original UTF-16 text. Application-wide document/query token limits can be overridden per call.
+
+## ONNX runtime ownership
+
+OnnxTextEmbeddings provides a small `EmbeddingOnnxExecutor : IOnnxModelExecutor<TokenizedModelInput,float[]>`. It owns only embedding-specific tensor behavior:
+
+```text
+input_ids / attention_mask / token_type_ids
+output shape validation
+mean pooling when required
+L2 normalization
+embedding dimension observation
+```
+
+`OnnxModelRuntime.NET` owns the generic machinery around that adapter: `InferenceSession` creation/disposal, one bounded global queue, per-instance concurrency, least-loaded scheduling, failure classification, draining/recovery, one-time recoverable retries, memory-pressure behavior, and runtime diagnostics.
+
+Existing public inference option names remain stable and map directly into `OnnxModelRuntimeOptions`.
+
+## Single-embedding post-processing
+
+`CombineToSingle` remains entirely embedding-specific and runs after inference:
 
 ```text
 TextEmbedding[]
    ↓
 validate common embedding space / dimensions
    ↓
-decode + normalize FP32 working vectors
-   ↓
 SemanticCoverage-v1
    ↓
-one native-dimensional semantic vector
-   ↓
-optional SRHT-v1 dimension reduction
-   ↓
-new reduced-space fingerprint when coordinates changed
+optional deterministic SRHT-v1 dimension reduction
    ↓
 optional FP32 / FP16 / INT8 / INT4 conversion
    ↓
 SingleEmbedding
 ```
 
-Semantic aggregation, coordinate-space reduction, and numeric/storage conversion are intentionally independent stages because they lose different kinds of information.
+Semantic aggregation, coordinate-space reduction, and numeric/storage conversion remain independent because they lose different kinds of information.
 
-## Model acquisition
+## Search architecture
 
-Hugging Face repositories, local directories, and HTTP manifests converge on the same runtime snapshot contract. Large weights remain outside the NuGet package.
+Core exposes three useful levels:
 
-## Tokenization and request preparation
+1. `ISemanticSearch` — existing semantic-only API and canonical `DefaultV1`.
+2. `ILexicalSearch` — in-memory `BM25-v1` without requiring a model.
+3. `IAdvancedSearch` / `SearchQuery` — composable global filters, stage filters, semantic/lexical retrieval stages, field weights, candidate budgets, RRF fusion, and optional post-filtering.
 
-The tokenizer is created once per active model runtime. Source tokenization records offsets so chunks map directly back to original UTF-16 text.
+A `SearchQuery` is deliberately a retrieval plan rather than a `Semantic/Lexical/Hybrid` enum so future retriever kinds can be added without redesigning hybrid search.
 
-Application-wide document/query token limits can be overridden per call. Document overrides alter the chunking ceiling; query overrides alter only validation because a semantic query is always one vector.
+## Database-native search
 
-## Inference scheduling
-
-A model instance is one ONNX `InferenceSession`, not one request slot. Each healthy instance can execute several concurrent `Run()` calls.
-
-A single scheduler owns routing decisions. It tracks active request counts and chooses the least-loaded healthy instance with available capacity. Ties rotate between equal instances. Native inference is launched independently after reservation so the central scheduler remains free to route the rest of a burst.
-
-Automatic request concurrency is `ThreadsPerModel / 2`, minimum one, capped at eight. With 16 threads/model, one model instance therefore exposes eight request slots by default.
-
-Additional model copies are supported but deliberately not treated as a normal scaling primitive. CPU inference frequently runs into shared memory/cache/interconnect/platform throughput before it runs out of model instances, so extra sessions often add RAM without adding meaningful throughput. The multi-instance machinery is useful for experimentation, odd hardware topologies, HA recovery behavior, and future CPU/NUMA/affinity tuning.
-
-## Instance recovery
-
-A recoverable session failure immediately removes that instance from future routing. Existing calls drain before the session is disposed. Recovery creates an entirely new `InferenceSession`, increments the instance generation, and only then restores the instance to the healthy pool.
-
-Failed recovery attempts stay out of rotation and use bounded exponential backoff. With no healthy instance, the global bounded queue waits for recovery.
-
-A normal recoverable runtime failure can retry its request once. Memory-pressure failures do not immediately retry cross-instance, reducing the chance of cascading memory exhaustion.
-
-## Observability
-
-`ModelRuntimeInfo` reports aggregate active/healthy/recovering counts and point-in-time `ModelInstanceRuntimeInfo` records. This lets an ASP.NET health endpoint expose reduced capacity or recovery without coupling the library to a monitoring stack.
-
-## Stable direct records
-
-The vector encoding and embedding record schema are explicitly versioned. Quantized vector bytes are self-describing. Document records preserve the model-space fingerprint and the historical token capacity actually used when the chunk was created—including per-call chunk overrides.
-
-A direct `TextEmbedding` may also carry `DimensionReduction` metadata. Reducing one direct chunk changes its vector space but does not turn it into an aggregate or discard its source/chunk metadata.
-
-## Single-embedding aggregation
-
-`CombineToSingle` operates entirely after inference. It does not require source text or another model.
-
-The combiner uses the persisted token ranges to apportion overlapping original source content symmetrically, computes pairwise semantic redundancy directly in the supplied full-dimensional space, and returns a `SingleEmbedding` rather than inventing direct-chunk metadata.
-
-Aggregation itself does not create a new coordinate system: a native-dimensional aggregate remains in the source embedding space. `AggregationCoherence` exposes how strongly the contributing source directions agree.
-
-## Dimension reduction
-
-`SRHT-v1` is deterministic and supports non-power-of-two source dimensions by internal zero-padding for the Hadamard transform.
-
-Aggregation reduces dimensions only after its full-dimensional semantic decision. Direct `TextEmbedding` and `QueryEmbedding` records may also be reduced independently when a storage/search backend has a native dimensional limit.
-
-Reduction creates a new coordinate space, so the embedding-space fingerprint is deterministically derived from the base fingerprint, reduction profile, source dimensions, and output dimensions. Queries and document chunks must apply the same transform before cosine comparison.
-
-## Semantic ranking
-
-Search operates on stored direct chunk vectors and does not require ONNX inference after a `QueryEmbedding` has been prepared. DefaultV1 scores each chunk, chooses strongest evidence, allows only bounded supporting evidence, then applies the same principle to weighted semantic fields.
-
-`SingleEmbedding` is deliberately not silently treated as a `TextEmbedding`: aggregate source-token count describes all original content compressed into that vector and must not be interpreted as one direct chunk's length confidence.
-
-## Database-native candidate search
-
-Core also defines a database-candidate boundary:
+Database adapters push portable prefilters and retrieval work into their engines:
 
 ```text
-QueryEmbedding
-      ↓
-provider-native relational filters + vector search
-      ↓
-SemanticCandidate<TKey>[]
-      ↓
-ISemanticCandidateReranker
-      ↓
-canonical DefaultV1
+SearchQuery
+   ↓
+global + stage portable filters
+   ↓
+provider-native semantic and/or lexical retrieval
+   ↓
+semantic candidates → core DefaultV1
+lexical candidates  → provider-native rank
+   ↓
+core Reciprocal Rank Fusion
+   ↓
+optional post-filter
 ```
 
-The database adapters own only broad candidate retrieval. They do not reimplement DefaultV1 in SQL.
-
-Official native-search adapters are isolated projects/packages:
+Official adapters:
 
 ```text
 OnnxTextEmbeddings.NET.PgVector
+  pgvector + PostgreSQL full text
+
 OnnxTextEmbeddings.NET.SqliteVec
+  sqlite-vec + FTS5 BM25
+
 OnnxTextEmbeddings.NET.SqlServer
+  SQL Server/Azure SQL VECTOR + Full-Text Search
 ```
 
-PostgreSQL/pgvector, sqlite-vec, and SQL Server/Azure SQL can therefore use their native vector engines while producing the same final ranking semantics as in-memory search.
+Each adapter accepts portable filter ASTs through logical-to-physical column mappings while retaining `AdditionalWhereSql` and provider-native command configuration for intentional backend-specific predicates.
 
-Plain SQLite remains valid storage and can still feed the in-memory scorer; sqlite-vec is the official SQLite-native search path.
+Raw lexical scores are never blended directly with semantic scores. Hybrid search uses rank positions through RRF because FTS5 BM25, PostgreSQL rank, SQL Server `RANK`, and semantic scores do not share a meaningful numeric scale.
+
+## Stable direct records
+
+The vector encoding and embedding record schema are explicitly versioned. Quantized vector bytes are self-describing. Document records preserve the model-space fingerprint and historical token capacity actually used when each chunk was created.
+
+A direct `TextEmbedding` may carry deterministic `DimensionReduction` metadata. Reducing a direct chunk changes its vector coordinate space but does not make it an aggregate.
 
 ## Native AOT boundary
 
-Core declares Native AOT compatibility and uses source-generated JSON metadata for its persisted protocol/cache records.
+Core remains Native AOT compatible. The separate non-NuGet `OnnxTextEmbeddings.Native` facade publishes the managed implementation as a Native AOT shared library with a stable C ABI.
 
-A separate non-NuGet `OnnxTextEmbeddings.Native` project publishes the managed implementation as a Native AOT shared library with a stable C ABI. The C boundary uses opaque handles, explicit UTF-8 pointer/length inputs, numeric status codes, library-owned output buffers, and explicit ABI versioning.
-
-This keeps unmanaged interoperability concerns out of the idiomatic managed API while allowing C, Rust, C++, Go, Zig, Python FFI, and other runtimes to bind to the same engine.
+The native embedding facade continues to expose an embedding-specific ABI. Its generic model hosting underneath is now supplied by the Native-AOT-compatible `OnnxModelRuntime.NET` managed dependency rather than a duplicated worker-pool implementation.
 
 ## Storage boundary
 
-Core has no persistence dependency. Portable records can be stored in SQLite, SQL Server, PostgreSQL, files, or another application store. Native vector-search dependencies stay in their optional provider projects, and the Native AOT facade stays outside NuGet packaging entirely.
+Core has no persistence dependency. Portable embedding records can be stored in any application store. Native vector/full-text dependencies remain isolated in the optional database provider packages.
