@@ -66,9 +66,11 @@ var result = await sqliteSearch.SearchAsync<string>(
 
 ### Filterable vec0 columns
 
-Portable semantic filters must map to normal sqlite-vec metadata/partition columns that are legal in a KNN `WHERE` clause. A `+auxiliary` column is payload-only: it can be returned by `SELECT`, but sqlite-vec does not allow it as a KNN filter constraint.
+Portable semantic filters must map to normal sqlite-vec metadata/partition columns. A `+auxiliary` column is payload-only: it can be returned by `SELECT`, but sqlite-vec does not allow it as a KNN filter constraint.
 
 Keep large payloads such as serialized records in auxiliary columns, and declare fields such as tenant, status, category, or other retrieval-time predicates as metadata/partition columns when they need to participate in semantic filtering.
+
+vec0's KNN planner intentionally accepts a narrower metadata-filter grammar than ordinary SQLite SQL. `SqliteVecSemanticSearch` therefore uses the fast `MATCH`/KNN path when the filter can be represented faithfully as supported simple comparisons. Richer portable expressions—such as `OR`, `NOT`, null-sensitive complements, multiple constraints on the same metadata column, or provider-specific `AdditionalWhereSql`—automatically use an exact filtered scan with sqlite-vec's scalar `vec_distance_cosine()` function. This preserves the shared filter semantics at the cost of the expected scan-based performance tradeoff. `SemanticCandidateRetrievalInfo.Mode` reports `.../KNN` or `.../FilteredExactScan` so the choice is observable.
 
 ## Native INT8 search
 
