@@ -65,7 +65,7 @@ async Task VerifyStorageAsync(string vectorDefinition, SqliteVecStorageKind stor
                 embedding {vectorDefinition},
                 +record_json text,
                 +field_weight float,
-                +tenant_id integer
+                tenant_id integer
             )
             """;
         await create.ExecuteNonQueryAsync();
