@@ -10,6 +10,13 @@ public enum SqliteVecStorageKind
     Int8 = 2
 }
 
+public sealed record SqliteVecCapabilities
+{
+    public required string Version { get; init; }
+    public bool SupportsFloat32 => true;
+    public bool SupportsInt8 => true;
+}
+
 public sealed record SqliteVecCandidateQuery
 {
     public required string Table { get; init; }
@@ -25,6 +32,40 @@ public sealed record SqliteVecCandidateQuery
     public IReadOnlyList<string>? IncludeFields { get; init; }
     public IReadOnlyDictionary<string, float>? QueryFieldWeights { get; init; }
     public SqliteVecStorageKind StorageKind { get; init; } = SqliteVecStorageKind.Float32;
+}
+
+public static class SqliteVecConnectionExtensions
+{
+    /// <summary>Loads the sqlite-vec native extension supplied by the exact-version-pinned sqlite-vec dependency.</summary>
+    public static void LoadOnnxTextEmbeddingsSqliteVec(this SqliteConnection connection)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        if (connection.State != System.Data.ConnectionState.Closed)
+            throw new InvalidOperationException("sqlite-vec must be loaded before opening the SQLite connection.");
+        connection.LoadVector();
+    }
+
+    public static async Task<SqliteVecCapabilities> GetSqliteVecCapabilitiesAsync(
+        this SqliteConnection connection,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        if (connection.State != System.Data.ConnectionState.Open)
+            throw new InvalidOperationException("The SQLite connection must already be open.");
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT vec_version()";
+        try
+        {
+            var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return new SqliteVecCapabilities { Version = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "unknown" };
+        }
+        catch (SqliteException ex)
+        {
+            throw new InvalidOperationException(
+                "sqlite-vec is not loaded on this connection. Call LoadOnnxTextEmbeddingsSqliteVec() before Open/OpenAsync().",
+                ex);
+        }
+    }
 }
 
 /// <summary>Native sqlite-vec KNN candidate retrieval followed by the shared core semantic reranker.</summary>
@@ -64,6 +105,7 @@ public sealed class SqliteVecSemanticSearch(ISemanticCandidateReranker reranker)
         ArgumentNullException.ThrowIfNull(candidateQuery);
         if (connection.State != System.Data.ConnectionState.Open)
             throw new InvalidOperationException("The SqliteConnection must already be open.");
+        _ = await connection.GetSqliteVecCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
         options ??= new DatabaseSemanticSearchOptions();
         var candidateCount = options.ResolveCandidateCount();
 
@@ -117,7 +159,7 @@ public sealed class SqliteVecSemanticSearch(ISemanticCandidateReranker reranker)
             : query.Vector.ConvertTo(EmbeddingVectorFormat.Float32);
         command.Parameters.Add("$ote_query", SqliteType.Blob).Value = vector.Data;
         foreach (var parameter in portableFilter.Parameters)
-            command.Parameters.AddWithValue("$" + parameter.Name, parameter.Value ?? DBNull.Value);
+            command.Parameters.AddWithValue("@" + parameter.Name, parameter.Value ?? DBNull.Value);
         if (candidateQuery.IncludeFields is { } included)
         {
             for (var index = 0; index < included.Count; index++)
