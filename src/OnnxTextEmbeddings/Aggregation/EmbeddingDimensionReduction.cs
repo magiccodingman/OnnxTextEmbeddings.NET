@@ -26,14 +26,58 @@ public static class EmbeddingDimensionReduction
             ? values
             : Reduce(values, outputDimensions, strategy);
         var format = outputFormat ?? query.Vector.Format;
-        var identity = outputDimensions == sourceDimensions
+        var profile = outputDimensions == sourceDimensions ? null : ResolveProfile(strategy);
+        var identity = profile is null
             ? query.Identity with { IsNormalized = true }
-            : CreateReducedIdentity(query.Identity, sourceDimensions, outputDimensions, ResolveProfile(strategy));
+            : CreateReducedIdentity(query.Identity, sourceDimensions, outputDimensions, profile);
+        var reduction = profile is null
+            ? query.DimensionReduction
+            : CreateReductionInfo(profile, sourceDimensions, outputDimensions);
 
         return query with
         {
             Vector = EmbeddingVector.FromFloat32(reduced, format),
-            Identity = identity
+            Identity = identity,
+            DimensionReduction = reduction
+        };
+    }
+
+    /// <summary>
+    /// Applies the same deterministic coordinate transform used for reduced queries to one direct document chunk.
+    /// Chunk/source metadata is preserved; this is dimensional reduction, not aggregation.
+    /// </summary>
+    public static TextEmbedding ReduceDimensions(
+        this TextEmbedding embedding,
+        int outputDimensions,
+        EmbeddingVectorFormat? outputFormat = null,
+        EmbeddingDimensionReductionStrategy strategy = EmbeddingDimensionReductionStrategy.Auto)
+    {
+        ArgumentNullException.ThrowIfNull(embedding);
+        if (outputDimensions == embedding.Vector.Dimensions && outputFormat is null)
+            return embedding;
+
+        var sourceDimensions = embedding.Vector.Dimensions;
+        ValidateDimensions(sourceDimensions, outputDimensions);
+        var values = embedding.Vector.ToFloat32();
+        EmbeddingVectorMath.NormalizeInPlace(values);
+
+        var reduced = outputDimensions == sourceDimensions
+            ? values
+            : Reduce(values, outputDimensions, strategy);
+        var format = outputFormat ?? embedding.Vector.Format;
+        var profile = outputDimensions == sourceDimensions ? null : ResolveProfile(strategy);
+        var identity = profile is null
+            ? embedding.Identity with { IsNormalized = true }
+            : CreateReducedIdentity(embedding.Identity, sourceDimensions, outputDimensions, profile);
+        var reduction = profile is null
+            ? embedding.DimensionReduction
+            : CreateReductionInfo(profile, sourceDimensions, outputDimensions);
+
+        return embedding with
+        {
+            Vector = EmbeddingVector.FromFloat32(reduced, format),
+            Identity = identity,
+            DimensionReduction = reduction
         };
     }
 
@@ -70,6 +114,17 @@ public static class EmbeddingDimensionReduction
             IsNormalized = true
         };
     }
+
+    internal static EmbeddingDimensionReductionInfo CreateReductionInfo(
+        string profile,
+        int sourceDimensions,
+        int outputDimensions) => new()
+    {
+        ProfileId = profile,
+        ProfileVersion = 1,
+        SourceDimensions = sourceDimensions,
+        OutputDimensions = outputDimensions
+    };
 
     internal static string ResolveProfile(EmbeddingDimensionReductionStrategy strategy) => strategy switch
     {

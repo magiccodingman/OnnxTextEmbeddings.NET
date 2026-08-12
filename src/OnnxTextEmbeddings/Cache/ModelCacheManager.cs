@@ -27,7 +27,6 @@ internal sealed partial class ModelCacheManager
         this.httpManifestSource = httpManifestSource;
         this.logger = logger;
     }
-    private sealed record CurrentCacheRecord(string DirectoryName, string SourceRevision, string Fingerprint);
 
     public async Task<ModelCandidate> ResolveCandidateAsync(CancellationToken cancellationToken, bool forceRemoteCheck = false)
     {
@@ -87,7 +86,8 @@ internal sealed partial class ModelCacheManager
         var record = new CurrentCacheRecord(relative, candidate.Snapshot.SourceRevision, candidate.Snapshot.EmbeddingSpaceFingerprint);
         var currentPath = Path.Combine(cacheRoot, "current.json");
         var tempPath = currentPath + ".tmp";
-        await File.WriteAllTextAsync(tempPath, JsonSerializer.Serialize(record), cancellationToken).ConfigureAwait(false);
+        var json = JsonSerializer.Serialize(record, EmbeddingJsonContext.Compact.CurrentCacheRecord);
+        await File.WriteAllTextAsync(tempPath, json, cancellationToken).ConfigureAwait(false);
         File.Move(tempPath, currentPath, true);
     }
 
@@ -188,7 +188,8 @@ internal sealed partial class ModelCacheManager
             return null;
         try
         {
-            var record = JsonSerializer.Deserialize<CurrentCacheRecord>(await File.ReadAllTextAsync(currentPath, cancellationToken).ConfigureAwait(false));
+            var json = await File.ReadAllTextAsync(currentPath, cancellationToken).ConfigureAwait(false);
+            var record = JsonSerializer.Deserialize(json, EmbeddingJsonContext.Compact.CurrentCacheRecord);
             if (record is null)
                 return null;
             var directory = Path.Combine(cacheRoot, "snapshots", record.DirectoryName);
@@ -233,5 +234,4 @@ internal sealed partial class ModelCacheManager
         var (manifestModelId, maxTokens, normalize) = ReadModelMetadata(directory);
         return new ModelSnapshot(manifestModelId ?? modelId, revision, fingerprint, directory, modelPath, tokenizerPath, maxTokens, normalize);
     }
-
 }
