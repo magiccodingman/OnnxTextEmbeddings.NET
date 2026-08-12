@@ -9,12 +9,15 @@
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <IsPackable>true</IsPackable>
+    <!-- sqlite-vec is intentionally isolated behind this adapter while upstream remains pre-v1. The adapter pins the
+         exact tested native wrapper version and continuously integration-tests it across supported desktop OSes. -->
+    <NoWarn>$(NoWarn);NU5104</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" />
-    <PackageReference Include="sqlite-vec" />
+    <PackageReference Include="sqlite-vec" VersionOverride="[0.1.7-alpha.2.1]" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
   </ItemGroup>
   <ItemGroup>
