@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageId>OnnxTextEmbeddings.NET.SqlServer</PackageId>
+    <Description>SQL Server 2025 and Azure SQL native vector semantic candidate search for OnnxTextEmbeddings.NET.</Description>
+    <PackageTags>onnx;embeddings;semantic-search;sql-server;azure-sql;vector</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>128x128_compressed.png</PackageIcon>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
+    <PackageReference Include="Microsoft.Data.SqlClient" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../128x128_compressed.png" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>

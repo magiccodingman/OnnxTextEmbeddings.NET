@@ -2,6 +2,8 @@
   <Folder Name="/src/">
     <Project Path="src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
     <Project Path="src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj" />
+    <Project Path="src/OnnxTextEmbeddings.SqliteVec/OnnxTextEmbeddings.SqliteVec.csproj" />
+    <Project Path="src/OnnxTextEmbeddings.SqlServer/OnnxTextEmbeddings.SqlServer.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/OnnxTextEmbeddings.Tests/OnnxTextEmbeddings.Tests.csproj" />
