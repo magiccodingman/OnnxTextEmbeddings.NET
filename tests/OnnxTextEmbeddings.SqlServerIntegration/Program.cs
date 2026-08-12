@@ -19,6 +19,13 @@ var capabilities = await SqlServerSemanticSearch.GetCapabilitiesAsync(connection
 if (!capabilities.SupportsVectorType || capabilities.MaximumDimensions != 1998)
     throw new InvalidOperationException("SQL Server 2025 VECTOR capability probe failed.");
 
+const string integrationDatabase = "onnx_text_embeddings_integration";
+await using (var createDatabase = new SqlCommand(
+                 $"IF DB_ID(N'{integrationDatabase}') IS NULL EXEC(N'CREATE DATABASE [{integrationDatabase}]')",
+                 connection))
+    await createDatabase.ExecuteNonQueryAsync();
+connection.ChangeDatabase(integrationDatabase);
+
 const string table = "onnx_semantic_candidates";
 await using (var drop = new SqlCommand($"IF OBJECT_ID('{table}', 'U') IS NOT NULL DROP TABLE {table}", connection))
     await drop.ExecuteNonQueryAsync();
