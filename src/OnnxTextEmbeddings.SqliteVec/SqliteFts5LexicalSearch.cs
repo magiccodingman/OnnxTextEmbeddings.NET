@@ -80,7 +80,7 @@ public sealed class SqliteFts5LexicalSearch
         command.Parameters.AddWithValue("$ote_lexical_query", ftsQuery);
         command.Parameters.AddWithValue("$ote_lexical_top", options.Top);
         foreach (var parameter in portableFilter.Parameters)
-            command.Parameters.AddWithValue("$" + parameter.Name, parameter.Value ?? DBNull.Value);
+            command.Parameters.AddWithValue("@" + parameter.Name, parameter.Value ?? DBNull.Value);
         configureFilterParameters?.Invoke(command);
 
         var results = new List<LexicalSearchResult<TKey>>(options.Top);
