@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using ModelArtifacts;
 
@@ -57,7 +59,8 @@ internal sealed class EmbeddingArtifactManager : IDisposable
         try
         {
             var candidate = await manager.ResolveCandidateAsync(forceRemoteCheck, cancellationToken).ConfigureAwait(false);
-            return new ModelCandidate(candidate, LoadSnapshot(candidate.Snapshot));
+            var snapshot = await LoadSnapshotAsync(candidate.Snapshot, cancellationToken).ConfigureAwait(false);
+            return new ModelCandidate(candidate, snapshot);
         }
         catch (ArtifactSourceException ex)
         {
@@ -112,7 +115,7 @@ internal sealed class EmbeddingArtifactManager : IDisposable
         }
     }
 
-    private ModelSnapshot LoadSnapshot(ArtifactSnapshot snapshot)
+    private async Task<ModelSnapshot> LoadSnapshotAsync(ArtifactSnapshot snapshot, CancellationToken cancellationToken)
     {
         var directory = snapshot.DirectoryPath;
         var onnxFiles = snapshot.AssetPaths
@@ -141,13 +144,15 @@ internal sealed class EmbeddingArtifactManager : IDisposable
         var tokenizerPath = snapshot.GetAssetPath(tokenizerRelative);
         var (manifestModelId, maxTokens, normalize) = ReadModelMetadata(directory);
 
-        // ModelArtifacts.NET deliberately treats this as an artifact fingerprint. OnnxTextEmbeddings preserves its
-        // existing embedding-space contract because the selected runtime asset set and fingerprint algorithm are the
-        // same ordered path + file SHA-256 calculation used by the original implementation.
+        // ArtifactFingerprint answers whether the acquired artifact set changed. EmbeddingSpaceFingerprint answers
+        // whether persisted vectors are comparable. Keep the historical embedding fingerprint algorithm/subset here
+        // so adopting ModelArtifacts.NET cannot invalidate existing vectors (including manifests with extra assets).
+        var embeddingSpaceFingerprint = await ComputeEmbeddingSpaceFingerprintAsync(directory, cancellationToken).ConfigureAwait(false);
+
         return new ModelSnapshot(
             manifestModelId ?? snapshot.ArtifactSetId,
             snapshot.SourceRevision,
-            snapshot.ArtifactFingerprint,
+            embeddingSpaceFingerprint,
             directory,
             modelPath,
             tokenizerPath,
@@ -194,6 +199,38 @@ internal sealed class EmbeddingArtifactManager : IDisposable
             LockedFileDeleteRetries = options.Cache.LockedFileDeleteRetries,
             LockedFileDeleteRetryDelay = options.Cache.LockedFileDeleteRetryDelay
         };
+    }
+
+    private static async Task<string> ComputeEmbeddingSpaceFingerprintAsync(string directory, CancellationToken cancellationToken)
+    {
+        using var aggregate = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var files = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Where(IsEmbeddingFingerprintAsset)
+            .OrderBy(path => Path.GetRelativePath(directory, path), StringComparer.Ordinal)
+            .ToArray();
+
+        foreach (var file in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var relative = Path.GetRelativePath(directory, file).Replace('\\', '/');
+            aggregate.AppendData(Encoding.UTF8.GetBytes(relative));
+            aggregate.AppendData([0]);
+            await using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, useAsync: true);
+            aggregate.AppendData(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
+        }
+
+        return Convert.ToHexString(aggregate.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static bool IsEmbeddingFingerprintAsset(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return extension.Equals(".onnx", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".json", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".txt", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".model", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".data", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".onnx_data", StringComparison.OrdinalIgnoreCase);
     }
 
     private static (string? ModelId, int? MaxTokens, bool Normalize) ReadModelMetadata(string directory)
