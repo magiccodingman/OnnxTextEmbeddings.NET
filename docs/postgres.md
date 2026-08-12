@@ -41,9 +41,9 @@ services.AddOnnxTextEmbeddingsPgVector();
 
 ## Exact and index-assisted modes
 
-`PgVectorSearchMode.Exact` is the conservative mode. The provider disables PostgreSQL index/bitmap scans locally for that candidate query so pgvector evaluates exact cosine ordering.
+`PgVectorSearchMode.Exact` is the conservative mode. It evaluates the filtered rows' cosine distances inside a materialized CTE before applying Top-K ordering. That keeps normal relational filtering available while preventing an approximate pgvector KNN index from becoming the candidate source. It does not change PostgreSQL planner/session settings and is safe to use inside a caller-owned transaction.
 
-`PgVectorSearchMode.Approximate` leaves the planner free to use configured pgvector indexes such as HNSW/IVFFlat.
+`PgVectorSearchMode.Approximate` uses the direct pgvector distance ordering and leaves the planner free to use configured pgvector indexes such as HNSW/IVFFlat.
 
 The returned `SemanticCandidateRetrievalInfo` records which mode produced the candidates.
 
