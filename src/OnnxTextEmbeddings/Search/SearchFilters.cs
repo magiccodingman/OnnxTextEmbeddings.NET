@@ -185,8 +185,9 @@ public sealed record CompiledSearchFilter(string Sql, IReadOnlyList<SearchFilter
 
 /// <summary>
 /// Database-neutral SQL predicate compiler. Providers supply the logical-field-to-quoted-column mapping; values are
-/// always emitted as parameters. SQL-dialect-specific predicates can be layered through each provider's existing
-/// native escape hatch.
+/// always emitted as parameters. Atomic predicates are emitted as two-valued expressions so SQL NULL semantics match
+/// the in-memory evaluator even when predicates are nested inside NOT. SQL-dialect-specific predicates can be layered
+/// through each provider's existing native escape hatch.
 /// </summary>
 public static class SearchFilterSqlCompiler
 {
@@ -234,17 +235,16 @@ public static class SearchFilterSqlCompiler
         }
 
         var parameter = Add(parameters, filter.Value);
-        var op = filter.Operator switch
+        return filter.Operator switch
         {
-            SearchComparisonOperator.Equal => "=",
-            SearchComparisonOperator.NotEqual => "<>",
-            SearchComparisonOperator.GreaterThan => ">",
-            SearchComparisonOperator.GreaterThanOrEqual => ">=",
-            SearchComparisonOperator.LessThan => "<",
-            SearchComparisonOperator.LessThanOrEqual => "<=",
+            SearchComparisonOperator.Equal => $"({field} IS NOT NULL AND {field} = @{parameter})",
+            SearchComparisonOperator.NotEqual => $"({field} IS NULL OR {field} <> @{parameter})",
+            SearchComparisonOperator.GreaterThan => $"({field} IS NOT NULL AND {field} > @{parameter})",
+            SearchComparisonOperator.GreaterThanOrEqual => $"({field} IS NOT NULL AND {field} >= @{parameter})",
+            SearchComparisonOperator.LessThan => $"({field} IS NOT NULL AND {field} < @{parameter})",
+            SearchComparisonOperator.LessThanOrEqual => $"({field} IS NOT NULL AND {field} <= @{parameter})",
             _ => throw new ArgumentOutOfRangeException(nameof(filter.Operator))
         };
-        return $"{field} {op} @{parameter}";
     }
 
     private static string CompileSet(
@@ -263,12 +263,15 @@ public static class SearchFilterSqlCompiler
         }
 
         var placeholders = nonNull.Select(value => "@" + Add(parameters, value)).ToArray();
-        var predicate = $"{field} {(filter.Operator == SearchSetOperator.In ? "IN" : "NOT IN")} ({string.Join(", ", placeholders)})";
-        if (!hasNull)
-            return predicate;
-        return filter.Operator == SearchSetOperator.In
-            ? $"({predicate} OR {field} IS NULL)"
-            : $"({predicate} AND {field} IS NOT NULL)";
+        var set = $"({string.Join(", ", placeholders)})";
+        if (filter.Operator == SearchSetOperator.In)
+            return hasNull
+                ? $"({field} IS NULL OR ({field} IS NOT NULL AND {field} IN {set}))"
+                : $"({field} IS NOT NULL AND {field} IN {set})";
+
+        return hasNull
+            ? $"({field} IS NOT NULL AND {field} NOT IN {set})"
+            : $"({field} IS NULL OR {field} NOT IN {set})";
     }
 
     private static string CompileString(
@@ -276,6 +279,7 @@ public static class SearchFilterSqlCompiler
         Func<string, string> resolveField,
         List<SearchFilterSqlParameter> parameters)
     {
+        var field = resolveField(filter.Field);
         var escaped = EscapeLike(filter.Value);
         var value = filter.Operator switch
         {
@@ -285,7 +289,7 @@ public static class SearchFilterSqlCompiler
             _ => throw new ArgumentOutOfRangeException(nameof(filter.Operator))
         };
         var parameter = Add(parameters, value);
-        return $"{resolveField(filter.Field)} LIKE @{parameter} ESCAPE '\\'";
+        return $"({field} IS NOT NULL AND {field} LIKE @{parameter} ESCAPE '\\')";
     }
 
     private static string Add(List<SearchFilterSqlParameter> parameters, object? value)
