@@ -1,6 +1,6 @@
 # PostgreSQL and pgvector
 
-Install the optional adapter when PostgreSQL-native vector candidate search is useful:
+Install the optional adapter when PostgreSQL-native semantic, lexical, or hybrid search is useful:
 
 ```bash
 dotnet add package OnnxTextEmbeddings.NET.PgVector
@@ -47,6 +47,51 @@ services.AddOnnxTextEmbeddingsPgVector();
 
 The returned `SemanticCandidateRetrievalInfo` records which mode produced the candidates.
 
+## Full-text lexical search
+
+`PgVectorLexicalSearch` uses PostgreSQL `tsvector`/`tsquery` retrieval and `ts_rank_cd` or `ts_rank` scoring. Application-owned schemas build and index the `tsvector`; the adapter maps logical search fields to PostgreSQL A/B/C/D text-search labels.
+
+```csharp
+var lexical = await lexicalSearch.SearchAsync<string>(
+    connection,
+    "postgresql backup",
+    new PgVectorLexicalQuery
+    {
+        Table = "documents",
+        ItemKeyColumn = "document_id",
+        SearchVectorColumn = "search_vector",
+        Fields =
+        [
+            new PgTextSearchField("title", PgTextSearchWeight.A),
+            new PgTextSearchField("body", PgTextSearchWeight.D)
+        ]
+    },
+    [SearchFieldWeight.Create("title", 8), SearchFieldWeight.Create("body", 1)],
+    new DatabaseLexicalSearchOptions { Top = 10 });
+```
+
+Logical field weights are not restricted to PostgreSQL's `0..1` rank-weight range. The adapter normalizes the selected logical weights proportionally before passing them to PostgreSQL, so a caller can express `title = 8` and `body = 1` while PostgreSQL receives the same relative `1.0 : 0.125` preference.
+
+Web-search, plain, phrase, and native tsquery parsing modes are available. Native mode intentionally exposes PostgreSQL's full text-search syntax.
+
+## Hybrid and advanced search
+
+`PgVectorAdvancedSearch` executes the common `SearchQuery` model against a `PgVectorSearchPlan` containing semantic and/or lexical mappings.
+
+```csharp
+var plan = new PgVectorSearchPlan
+{
+    Semantic = semanticMapping,
+    Lexical = lexicalMapping
+};
+
+var results = await advanced.SearchAsync<string>(connection, searchQuery, plan);
+```
+
+Each stage can have independent fields, weights, filters, and candidate counts. Semantic and PostgreSQL lexical rankings are fused with reciprocal-rank fusion, so raw cosine/DefaultV1 and `ts_rank[_cd]` values are never treated as if they share a score scale.
+
+See [Lexical, BM25, hybrid, and advanced search](lexical-hybrid-search.md) for the provider-neutral query model.
+
 ## Jasper and pgvector dimensions
 
 Jasper returns 2048 dimensions.
@@ -66,6 +111,6 @@ A schema may keep both when compact portable persistence and native PostgreSQL s
 
 ## Filtering
 
-The provider always adds the query fingerprint predicate itself. Application filters can be added using a trusted static `AdditionalWhereSql` fragment and parameter callback.
+Semantic and lexical mappings can expose logical `FilterColumns`; the shared `SearchFilter` tree is translated to parameterized PostgreSQL predicates. The semantic provider always adds the query fingerprint predicate itself.
 
-Do not interpolate user input into `AdditionalWhereSql`; bind it as normal Npgsql parameters.
+For PostgreSQL-specific predicates outside the portable filter vocabulary, use a trusted static `AdditionalWhereSql` fragment and the command-parameter callback. Do not interpolate user input into `AdditionalWhereSql`; bind it as normal Npgsql parameters.
