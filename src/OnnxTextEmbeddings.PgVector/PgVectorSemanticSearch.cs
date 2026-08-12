@@ -128,17 +128,19 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
             configureFilterParameters?.Invoke(command);
 
             var results = new List<SemanticCandidate<TKey>>(candidateCount);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
             {
-                results.Add(new SemanticCandidate<TKey>
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    ItemKey = ReadKey<TKey>(reader.GetValue(0)),
-                    FieldName = reader.GetString(1),
-                    Embedding = EmbeddingSerializer.DeserializeJson(reader.GetString(2)),
-                    FieldWeight = Convert.ToSingle(reader.GetValue(3), CultureInfo.InvariantCulture),
-                    NativeSimilarity = Convert.ToSingle(reader.GetValue(4), CultureInfo.InvariantCulture)
-                });
+                    results.Add(new SemanticCandidate<TKey>
+                    {
+                        ItemKey = ReadKey<TKey>(reader.GetValue(0)),
+                        FieldName = reader.GetString(1),
+                        Embedding = EmbeddingSerializer.DeserializeJson(reader.GetString(2)),
+                        FieldWeight = Convert.ToSingle(reader.GetValue(3), CultureInfo.InvariantCulture),
+                        NativeSimilarity = Convert.ToSingle(reader.GetValue(4), CultureInfo.InvariantCulture)
+                    });
+                }
             }
 
             if (ownedTransaction is not null)
