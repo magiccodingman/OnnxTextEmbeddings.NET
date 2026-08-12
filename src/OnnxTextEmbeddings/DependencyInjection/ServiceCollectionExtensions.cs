@@ -20,9 +20,7 @@ public static class ServiceCollectionExtensions
         {
             Timeout = Timeout.InfiniteTimeSpan
         });
-        services.AddSingleton<HuggingFaceModelSource>();
-        services.AddSingleton<HttpManifestModelSource>();
-        services.AddSingleton<ModelCacheManager>();
+        services.AddSingleton<EmbeddingArtifactManager>();
         services.AddSingleton<TextEmbeddingService>();
         services.AddSingleton<ITextEmbeddingService>(sp => sp.GetRequiredService<TextEmbeddingService>());
         services.AddSingleton<SemanticSearchService>();

@@ -98,8 +98,8 @@ public sealed class ModelCacheOptions
 
 public static class InferenceDefaults
 {
-    public const int ThreadsPerModel = 16;
-    public const int AutomaticConcurrentRequestsPerModelCap = 8;
+    public const int ThreadsPerModel = global::OnnxModelRuntime.OnnxModelRuntimeDefaults.ThreadsPerModel;
+    public const int AutomaticConcurrentRequestsPerModelCap = global::OnnxModelRuntime.OnnxModelRuntimeDefaults.AutomaticConcurrentRequestsPerModelCap;
 }
 
 internal sealed record ResolvedInferenceOptions(
@@ -167,18 +167,24 @@ public sealed class InferenceOptions
         set => MaximumAutoThreadsPerModel = value;
     }
 
+    internal global::OnnxModelRuntime.OnnxModelRuntimeOptions ToRuntimeOptions() => new()
+    {
+        ModelInstanceCount = ModelInstanceCount,
+        ThreadsPerModel = ThreadsPerModel,
+        MaximumAutoThreadsPerModel = MaximumAutoThreadsPerModel,
+        ConcurrentRequestsPerModel = ConcurrentRequestsPerModel,
+        QueueCapacity = QueueCapacity
+    };
+
     internal ResolvedInferenceOptions Resolve(JasperModelPrecision? jasperPrecision = null)
     {
-        _ = jasperPrecision; // Preset identity is intentionally not part of automatic concurrency policy.
-        var threads = ThreadsPerModel > 0
-            ? ThreadsPerModel
-            : Math.Max(1, Math.Min(MaximumAutoThreadsPerModel, Environment.ProcessorCount / ModelInstanceCount));
-
-        var concurrency = ConcurrentRequestsPerModel > 0
-            ? ConcurrentRequestsPerModel
-            : Math.Clamp(threads / 2, 1, InferenceDefaults.AutomaticConcurrentRequestsPerModelCap);
-
-        return new ResolvedInferenceOptions(ModelInstanceCount, threads, concurrency, QueueCapacity);
+        _ = jasperPrecision;
+        var resolved = ToRuntimeOptions().Resolve();
+        return new ResolvedInferenceOptions(
+            resolved.ModelInstanceCount,
+            resolved.ThreadsPerModel,
+            resolved.ConcurrentRequestsPerModel,
+            resolved.QueueCapacity);
     }
 }
 
@@ -231,16 +237,7 @@ public sealed class OnnxTextEmbeddingsOptions
             throw new ArgumentOutOfRangeException(nameof(DocumentChunkMaxTokens));
         if (QueryMaxTokens <= 0)
             throw new ArgumentOutOfRangeException(nameof(QueryMaxTokens));
-        if (Inference.ModelInstanceCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(Inference.ModelInstanceCount));
-        if (Inference.ThreadsPerModel < 0)
-            throw new ArgumentOutOfRangeException(nameof(Inference.ThreadsPerModel));
-        if (Inference.MaximumAutoThreadsPerModel <= 0)
-            throw new ArgumentOutOfRangeException(nameof(Inference.MaximumAutoThreadsPerModel));
-        if (Inference.ConcurrentRequestsPerModel < 0)
-            throw new ArgumentOutOfRangeException(nameof(Inference.ConcurrentRequestsPerModel));
-        if (Inference.QueueCapacity <= 0)
-            throw new ArgumentOutOfRangeException(nameof(Inference.QueueCapacity));
+        _ = Inference.ToRuntimeOptions().Resolve();
         if (Chunking.ChunkOverlapTokens < 0)
             throw new ArgumentOutOfRangeException(nameof(Chunking.ChunkOverlapTokens));
         if (Search.MinimumLengthConfidence is < 0 or > 1)

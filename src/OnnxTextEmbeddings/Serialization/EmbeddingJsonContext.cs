@@ -10,7 +10,6 @@ namespace OnnxTextEmbeddings;
 [JsonSerializable(typeof(TextEmbedding[]))]
 [JsonSerializable(typeof(QueryEmbedding))]
 [JsonSerializable(typeof(SingleEmbedding))]
-[JsonSerializable(typeof(CurrentCacheRecord))]
 internal sealed partial class EmbeddingJsonContext : JsonSerializerContext
 {
     internal static EmbeddingJsonContext Compact { get; } = new(new JsonSerializerOptions(JsonSerializerDefaults.Web));
