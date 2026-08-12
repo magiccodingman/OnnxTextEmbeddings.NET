@@ -50,7 +50,7 @@ if (lexical.Results.Count == 0 || lexical.Results[0].Item != "backup")
 
 await VerifyStorageAsync("float[4] distance_metric=cosine", SqliteVecStorageKind.Float32, "f32");
 await VerifyStorageAsync("int8[4] distance_metric=cosine", SqliteVecStorageKind.Int8, "i8");
-Console.WriteLine($"PASS SQLite/sqlite-vec {capabilities.Version} FP32 + INT8 + FTS5 BM25 + filtering + hybrid RRF integration.");
+Console.WriteLine($"PASS SQLite/sqlite-vec {capabilities.Version} FP32 + INT8 + FTS5 BM25 + filtering + exact-filter fallback + hybrid RRF integration.");
 
 async Task VerifyStorageAsync(string vectorDefinition, SqliteVecStorageKind storageKind, string suffix)
 {
@@ -103,10 +103,24 @@ async Task VerifyStorageAsync(string vectorDefinition, SqliteVecStorageKind stor
         semanticMapping,
         new DatabaseSemanticSearchOptions { Top = 1, CandidateCount = 10 });
     if (result.Results.Count != 1 || result.Results[0].Item != "backup")
-        throw new InvalidOperationException($"sqlite-vec {storageKind} filtered candidate retrieval returned the wrong item.");
+        throw new InvalidOperationException($"sqlite-vec {storageKind} filtered KNN candidate retrieval returned the wrong item.");
 
     if (storageKind == SqliteVecStorageKind.Float32)
     {
+        var exactFallback = await search.SearchAsync<string>(
+            connection,
+            query,
+            semanticMapping with
+            {
+                Filter = SearchFilter.Or(
+                    SearchFilter.Equal("TenantId", 1),
+                    SearchFilter.Equal("TenantId", 999))
+            },
+            new DatabaseSemanticSearchOptions { Top = 1, CandidateCount = 10 });
+        if (exactFallback.Results.Count != 1 || exactFallback.Results[0].Item != "backup" ||
+            !exactFallback.Retrieval.Mode.Contains("FilteredExactScan", StringComparison.Ordinal))
+            throw new InvalidOperationException("SQLite rich-filter exact-scan fallback did not preserve semantic filtering.");
+
         var hybridQuery = SearchQuery.Create("postgresql backup")
             .Where(SearchFilter.Equal("TenantId", 1))
             .Add(SearchRetrievalStage.Semantic(SearchFieldWeight.Create("content", 1)).Candidates(10))
