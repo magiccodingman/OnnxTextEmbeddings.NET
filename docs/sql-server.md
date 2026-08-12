@@ -1,4 +1,4 @@
-# SQL Server 2025 and Azure SQL vector search
+# SQL Server 2025 and Azure SQL vector and full-text search
 
 Install:
 
@@ -6,7 +6,7 @@ Install:
 dotnet add package OnnxTextEmbeddings.NET.SqlServer
 ```
 
-The adapter targets SQL Server 2025 / Azure SQL native `VECTOR` operations while keeping final DefaultV1 ranking in core.
+The adapter targets SQL Server 2025 / Azure SQL native `VECTOR` operations while keeping final DefaultV1 ranking in core. It also supports SQL Server Full-Text Search and semantic + lexical hybrid plans.
 
 ## The 1998-dimension boundary
 
@@ -74,8 +74,53 @@ SqlServerVectorCapabilities capabilities =
 
 to inspect native vector support, preview-feature state, and approximate-search availability before selecting that mode.
 
+## Full-Text lexical search
+
+`SqlServerFullTextSearch` uses `FREETEXTTABLE` for normal natural-language retrieval or `CONTAINSTABLE` when an application explicitly wants SQL Server full-text query syntax.
+
+```csharp
+var lexical = await fullText.SearchAsync<string>(
+    connection,
+    "postgresql backup",
+    new SqlServerLexicalQuery
+    {
+        Table = "dbo.documents",
+        ItemKeyColumn = "document_id",
+        FullTextKeyColumn = "id",
+        Fields =
+        [
+            new SqlServerFullTextField("title", "title"),
+            new SqlServerFullTextField("body", "body")
+        ]
+    },
+    [SearchFieldWeight.Create("title", 8), SearchFieldWeight.Create("body", 1)],
+    new DatabaseLexicalSearchOptions { Top = 10 });
+```
+
+SQL Server does not expose an FTS5-style arbitrary BM25 column-weight vector. When several logical fields have different weights, the adapter performs the native full-text retrieval for those fields and combines their rank positions with the requested logical weights instead of pretending SQL Server's raw `RANK` values are portable.
+
+Full-Text Search must be installed/enabled by the SQL Server deployment and full-text indexes must live in an application/user database; SQL Server does not allow full-text search in `master`, `tempdb`, or `model`.
+
+## Hybrid and advanced search
+
+`SqlServerAdvancedSearch` executes the common `SearchQuery` model against a `SqlServerSearchPlan` containing semantic and/or lexical mappings.
+
+```csharp
+var plan = new SqlServerSearchPlan
+{
+    Semantic = semanticMapping,
+    Lexical = lexicalMapping
+};
+
+var results = await advanced.SearchAsync<string>(connection, searchQuery, plan);
+```
+
+Each stage can have independent fields, weights, filters, and candidate counts. The outer hybrid ranking uses reciprocal-rank fusion, so vector similarity/DefaultV1 and SQL Server Full-Text `RANK` are never treated as directly comparable numeric scores.
+
+See [Lexical, BM25, hybrid, and advanced search](lexical-hybrid-search.md) for the provider-neutral query model.
+
 ## Schema ownership
 
-The adapter does not create application tables, migrations, vector indexes, tenant filters, or permissions. It accepts schema/column mappings and performs candidate retrieval against application-owned data.
+The adapter does not create application tables, migrations, vector indexes, full-text catalogs/indexes, tenant filters, or permissions. It accepts schema/column mappings and performs retrieval against application-owned data.
 
-Fingerprint filtering is always included by the provider. Application predicates can be supplied as trusted static SQL plus normal `SqlParameter` values.
+Semantic and lexical mappings can expose logical `FilterColumns`; the shared `SearchFilter` tree is translated to parameterized SQL. Fingerprint filtering is always included by the semantic provider. SQL Server-specific predicates can still be supplied as trusted static SQL plus normal `SqlParameter` values.
