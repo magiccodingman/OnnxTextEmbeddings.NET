@@ -162,7 +162,7 @@ internal sealed class SemanticSearchService(
             .Select(group => new CandidateItem<TKey>(group.Key, CreateFields(group)))
             .ToArray();
 
-        var results = await SearchFieldsAsync(
+        var ranked = await SearchFieldsAsync(
             query,
             items,
             item => item.Fields,
@@ -173,9 +173,18 @@ internal sealed class SemanticSearchService(
             },
             cancellationToken).ConfigureAwait(false);
 
+        var results = ranked.Select(result => new SemanticSearchResult<TKey>
+        {
+            Item = result.Item.Key,
+            Score = result.Score,
+            BestMatch = result.BestMatch,
+            Fields = result.Fields,
+            Scoring = result.Scoring
+        }).ToArray();
+
         return new DatabaseSemanticSearchResult<TKey>
         {
-            Results = results.Select(result => result with { Item = result.Item.Key }).ToArray(),
+            Results = results,
             Retrieval = candidates.Retrieval
         };
     }
