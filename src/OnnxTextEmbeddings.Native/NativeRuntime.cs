@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.DependencyInjection;
@@ -49,9 +50,14 @@ internal sealed class NativeEmbeddingService : IDisposable
     }
 }
 
+internal sealed class NativeHandleException(string message) : Exception(message);
+
 internal static unsafe class NativeRuntime
 {
     internal const uint AbiVersion = 1;
+
+    private static readonly ConcurrentDictionary<nint, NativeEmbeddingService> Services = new();
+    private static long nextHandle;
 
     [ThreadStatic]
     private static string? lastError;
@@ -63,28 +69,42 @@ internal static unsafe class NativeRuntime
 
     internal static OteStatus MapException(Exception exception) => exception switch
     {
-        ArgumentException => OteStatus.InvalidArgument,
+        NativeHandleException => OteStatus.InvalidHandle,
         QueryTokenLimitExceededException => OteStatus.QueryTooLong,
         EmbeddingSpaceMismatchException => OteStatus.EmbeddingSpaceMismatch,
         EmbeddingSerializationException => OteStatus.SerializationError,
         OutOfMemoryException => OteStatus.OutOfMemory,
         ModelSourceException or ModelDownloadException or ModelValidationException or InferenceException => OteStatus.ModelError,
+        ArgumentException => OteStatus.InvalidArgument,
         _ => OteStatus.InternalError
     };
 
+    internal static nint AddService(NativeEmbeddingService service)
+    {
+        ArgumentNullException.ThrowIfNull(service);
+        while (true)
+        {
+            var raw = Interlocked.Increment(ref nextHandle);
+            if (raw <= 0)
+                throw new InvalidOperationException("Native service handle space was exhausted.");
+            var handle = checked((nint)raw);
+            if (Services.TryAdd(handle, service))
+                return handle;
+        }
+    }
+
     internal static NativeEmbeddingService GetService(nint handle)
     {
-        if (handle == 0)
-            throw new ArgumentException("The service handle is null.", nameof(handle));
-        try
-        {
-            var gcHandle = GCHandle.FromIntPtr(handle);
-            return gcHandle.Target as NativeEmbeddingService ?? throw new ArgumentException("The service handle is invalid.", nameof(handle));
-        }
-        catch (Exception ex) when (ex is not ArgumentException)
-        {
-            throw new ArgumentException("The service handle is invalid.", nameof(handle), ex);
-        }
+        if (handle == 0 || !Services.TryGetValue(handle, out var service))
+            throw new NativeHandleException("The service handle is invalid or has already been destroyed.");
+        return service;
+    }
+
+    internal static NativeEmbeddingService RemoveService(nint handle)
+    {
+        if (handle == 0 || !Services.TryRemove(handle, out var service))
+            throw new NativeHandleException("The service handle is invalid or has already been destroyed.");
+        return service;
     }
 
     internal static string ReadUtf8(byte* data, nuint length)

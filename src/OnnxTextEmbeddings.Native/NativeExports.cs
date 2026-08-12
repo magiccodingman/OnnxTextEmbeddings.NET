@@ -32,10 +32,12 @@ internal static unsafe class NativeExports
     public static int ServiceCreate(OteOptions* options, nint* outputHandle)
     {
         NativeRuntime.ClearError();
+        NativeEmbeddingService? service = null;
         try
         {
             if (outputHandle is null)
                 throw new ArgumentNullException(nameof(outputHandle));
+            *outputHandle = 0;
             var resolved = options is null ? default : *options;
             if (options is not null)
             {
@@ -44,13 +46,14 @@ internal static unsafe class NativeExports
                 if (resolved.StructSize != 0 && resolved.StructSize < (uint)sizeof(OteOptions))
                     throw new ArgumentException("ote_options.struct_size is smaller than the v1 structure.");
             }
-            var service = new NativeEmbeddingService(resolved);
-            var handle = GCHandle.Alloc(service);
-            *outputHandle = GCHandle.ToIntPtr(handle);
+            service = new NativeEmbeddingService(resolved);
+            *outputHandle = NativeRuntime.AddService(service);
+            service = null;
             return (int)OteStatus.Ok;
         }
         catch (Exception ex)
         {
+            service?.Dispose();
             NativeRuntime.SetError(ex);
             return (int)NativeRuntime.MapException(ex);
         }
@@ -64,17 +67,13 @@ internal static unsafe class NativeExports
         {
             if (handle == 0)
                 return (int)OteStatus.Ok;
-            var gcHandle = GCHandle.FromIntPtr(handle);
-            if (gcHandle.Target is not NativeEmbeddingService service)
-                throw new ArgumentException("The service handle is invalid.", nameof(handle));
-            service.Dispose();
-            gcHandle.Free();
+            NativeRuntime.RemoveService(handle).Dispose();
             return (int)OteStatus.Ok;
         }
         catch (Exception ex)
         {
             NativeRuntime.SetError(ex);
-            return (int)OteStatus.InvalidHandle;
+            return (int)NativeRuntime.MapException(ex);
         }
     }
 
