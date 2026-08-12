@@ -2,10 +2,16 @@
   <Folder Name="/src/">
     <Project Path="src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
     <Project Path="src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj" />
+    <Project Path="src/OnnxTextEmbeddings.SqliteVec/OnnxTextEmbeddings.SqliteVec.csproj" />
+    <Project Path="src/OnnxTextEmbeddings.SqlServer/OnnxTextEmbeddings.SqlServer.csproj" />
+    <Project Path="src/OnnxTextEmbeddings.Native/OnnxTextEmbeddings.Native.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/OnnxTextEmbeddings.Tests/OnnxTextEmbeddings.Tests.csproj" />
     <Project Path="tests/OnnxTextEmbeddings.PostgresIntegration/OnnxTextEmbeddings.PostgresIntegration.csproj" />
+    <Project Path="tests/OnnxTextEmbeddings.SqliteVecIntegration/OnnxTextEmbeddings.SqliteVecIntegration.csproj" />
+    <Project Path="tests/OnnxTextEmbeddings.SqlServerIntegration/OnnxTextEmbeddings.SqlServerIntegration.csproj" />
+    <Project Path="tests/OnnxTextEmbeddings.AotSmoke/OnnxTextEmbeddings.AotSmoke.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/OnnxTextEmbeddings.Sample.Console/OnnxTextEmbeddings.Sample.Console.csproj" />

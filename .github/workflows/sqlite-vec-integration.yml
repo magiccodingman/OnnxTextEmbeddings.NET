@@ -1,0 +1,30 @@
+name: SQLite sqlite-vec integration
+
+on:
+  push:
+    branches-ignore:
+      - release
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-vec:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Run sqlite-vec integration
+        run: dotnet run --project tests/OnnxTextEmbeddings.SqliteVecIntegration/OnnxTextEmbeddings.SqliteVecIntegration.csproj --configuration Release

@@ -1,8 +1,8 @@
-# SQLite
+# SQLite persistence
 
-SQLite is a natural fit for the library's target scale: store compact vectors as BLOBs and rank a scoped candidate set in memory.
+Plain SQLite remains a natural storage option for OnnxTextEmbeddings.NET because core records are storage-neutral.
 
-## Suggested schema
+A simple portable schema can store the versioned vector envelope and complete embedding metadata:
 
 ```sql
 CREATE TABLE document_embeddings (
@@ -10,23 +10,34 @@ CREATE TABLE document_embeddings (
     chunk_index INTEGER NOT NULL,
     fingerprint TEXT NOT NULL,
     vector BLOB NOT NULL,
-    metadata_json TEXT NOT NULL,
+    record_json TEXT NOT NULL,
     PRIMARY KEY (document_id, chunk_index)
 );
 CREATE INDEX ix_embeddings_fingerprint ON document_embeddings(fingerprint);
 ```
 
-`vector` can contain `EmbeddingSerializer.SerializeVector(...)`. Keep the rest of `TextEmbedding` as structured columns or JSON depending on the application's query needs.
+`vector` can contain `EmbeddingSerializer.SerializeVector(...)`. `record_json` can contain `EmbeddingSerializer.SerializeJson(...)`.
 
-## Search flow
+For a small scoped working set, ordinary SQLite filters can select rows and core `ISemanticSearch` can rank the deserialized records in memory.
 
-1. Apply ordinary SQL filters first (tenant, project, category, date, permissions).
-2. Load the resulting candidate embeddings.
-3. Create one `QueryEmbedding`.
-4. Run `ISemanticSearch` in memory.
+## Official SQLite vector search
 
-This avoids requiring a SQLite vector extension for the small-to-medium workloads this package targets.
+When the goal is to keep cosine/KNN candidate work inside SQLite rather than materializing a large vector working set in .NET, use the official sqlite-vec adapter:
 
-## Compact storage
+```bash
+dotnet add package OnnxTextEmbeddings.NET.SqliteVec
+```
 
-At 2048 dimensions, packed INT4 is roughly 1 KiB of vector bytes per chunk and INT8 roughly 2 KiB, before record metadata. Model precision does not dictate storage precision.
+See [SQLite/sqlite-vec](sqlite-vec.md).
+
+The project therefore distinguishes:
+
+```text
+plain SQLite
+  = generic portable persistence + optional in-memory search
+
+SQLite + sqlite-vec
+  = official SQLite-native semantic candidate search
+```
+
+There is no need for a separate plain-SQLite semantic-search abstraction whose only behavior would be selecting BLOBs and handing them to the already-existing in-memory scorer.

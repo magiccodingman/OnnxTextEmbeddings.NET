@@ -6,15 +6,11 @@ namespace OnnxTextEmbeddings;
 
 public static class EmbeddingSerializer
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = false
-    };
-
     public static string SerializeJson(TextEmbedding embedding, bool indented = false)
     {
         ArgumentNullException.ThrowIfNull(embedding);
-        return JsonSerializer.Serialize(embedding, new JsonSerializerOptions(JsonOptions) { WriteIndented = indented });
+        var context = indented ? EmbeddingJsonContext.Indented : EmbeddingJsonContext.Compact;
+        return JsonSerializer.Serialize(embedding, context.TextEmbedding);
     }
 
     public static TextEmbedding DeserializeJson(string json)
@@ -22,9 +18,10 @@ public static class EmbeddingSerializer
         ArgumentException.ThrowIfNullOrWhiteSpace(json);
         try
         {
-            var value = JsonSerializer.Deserialize<TextEmbedding>(json, JsonOptions) ??
+            var value = JsonSerializer.Deserialize(json, EmbeddingJsonContext.Compact.TextEmbedding) ??
                 throw new EmbeddingSerializationException("Embedding JSON contained no record.");
             EnsureSchema(value.SchemaVersion);
+            _ = value.Vector.ToFloat32();
             return value;
         }
         catch (EmbeddingSerializationException)
@@ -37,10 +34,42 @@ public static class EmbeddingSerializer
         }
     }
 
+    public static string SerializeJson(IReadOnlyList<TextEmbedding> embeddings, bool indented = false)
+    {
+        ArgumentNullException.ThrowIfNull(embeddings);
+        var context = indented ? EmbeddingJsonContext.Indented : EmbeddingJsonContext.Compact;
+        return JsonSerializer.Serialize(embeddings.ToArray(), context.TextEmbeddingArray);
+    }
+
+    public static IReadOnlyList<TextEmbedding> DeserializeDocumentJson(string json)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(json);
+        try
+        {
+            var values = JsonSerializer.Deserialize(json, EmbeddingJsonContext.Compact.TextEmbeddingArray) ??
+                throw new EmbeddingSerializationException("Document embedding JSON contained no records.");
+            foreach (var value in values)
+            {
+                EnsureSchema(value.SchemaVersion);
+                _ = value.Vector.ToFloat32();
+            }
+            return values;
+        }
+        catch (EmbeddingSerializationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+            throw new EmbeddingSerializationException("Unable to deserialize the document embedding records.", ex);
+        }
+    }
+
     public static string SerializeJson(QueryEmbedding embedding, bool indented = false)
     {
         ArgumentNullException.ThrowIfNull(embedding);
-        return JsonSerializer.Serialize(embedding, new JsonSerializerOptions(JsonOptions) { WriteIndented = indented });
+        var context = indented ? EmbeddingJsonContext.Indented : EmbeddingJsonContext.Compact;
+        return JsonSerializer.Serialize(embedding, context.QueryEmbedding);
     }
 
     public static QueryEmbedding DeserializeQueryJson(string json)
@@ -48,9 +77,10 @@ public static class EmbeddingSerializer
         ArgumentException.ThrowIfNullOrWhiteSpace(json);
         try
         {
-            var value = JsonSerializer.Deserialize<QueryEmbedding>(json, JsonOptions) ??
+            var value = JsonSerializer.Deserialize(json, EmbeddingJsonContext.Compact.QueryEmbedding) ??
                 throw new EmbeddingSerializationException("Query embedding JSON contained no record.");
             EnsureSchema(value.SchemaVersion);
+            _ = value.Vector.ToFloat32();
             return value;
         }
         catch (EmbeddingSerializationException)
@@ -66,7 +96,8 @@ public static class EmbeddingSerializer
     public static string SerializeJson(SingleEmbedding embedding, bool indented = false)
     {
         ArgumentNullException.ThrowIfNull(embedding);
-        return JsonSerializer.Serialize(embedding, new JsonSerializerOptions(JsonOptions) { WriteIndented = indented });
+        var context = indented ? EmbeddingJsonContext.Indented : EmbeddingJsonContext.Compact;
+        return JsonSerializer.Serialize(embedding, context.SingleEmbedding);
     }
 
     public static SingleEmbedding DeserializeSingleJson(string json)
@@ -74,7 +105,7 @@ public static class EmbeddingSerializer
         ArgumentException.ThrowIfNullOrWhiteSpace(json);
         try
         {
-            var value = JsonSerializer.Deserialize<SingleEmbedding>(json, JsonOptions) ??
+            var value = JsonSerializer.Deserialize(json, EmbeddingJsonContext.Compact.SingleEmbedding) ??
                 throw new EmbeddingSerializationException("Single-embedding JSON contained no record.");
             EnsureSchema(value.SchemaVersion);
             _ = value.Vector.ToFloat32();

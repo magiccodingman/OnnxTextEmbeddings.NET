@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <PackageId>OnnxTextEmbeddings.NET.PgVector</PackageId>
-    <Description>PostgreSQL/pgvector native candidate search and conversion helpers for OnnxTextEmbeddings.NET.</Description>
-    <PackageTags>onnx;embeddings;semantic-search;pgvector;postgresql</PackageTags>
+    <PackageId>OnnxTextEmbeddings.NET.SqlServer</PackageId>
+    <Description>SQL Server 2025 and Azure SQL native vector semantic candidate search for OnnxTextEmbeddings.NET.</Description>
+    <PackageTags>onnx;embeddings;semantic-search;sql-server;azure-sql;vector</PackageTags>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>128x128_compressed.png</PackageIcon>
@@ -12,9 +12,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
-    <PackageReference Include="Pgvector" />
-    <PackageReference Include="Pgvector.EntityFrameworkCore" />
-    <PackageReference Include="Npgsql" />
+    <PackageReference Include="Microsoft.Data.SqlClient" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
   </ItemGroup>
   <ItemGroup>

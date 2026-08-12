@@ -24,26 +24,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-
       - name: Fetch tags
         run: git fetch --tags --force
-
       - name: Detect package-affecting changes
         id: changes
         shell: pwsh
         run: ./eng/DetectPackageChanges.ps1
-
       - name: Resolve next package version
         if: steps.changes.outputs.should_release == 'true'
         id: version
         shell: pwsh
         run: ./eng/ResolveReleaseVersion.ps1
-
       - name: No package release required
         if: steps.changes.outputs.should_release != 'true'
         run: echo "No NuGet package-affecting changes were detected."
@@ -56,21 +51,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-
       - name: Restore
         run: dotnet restore OnnxTextEmbeddings.slnx
-
       - name: Build
         run: dotnet build OnnxTextEmbeddings.slnx --configuration Release --no-restore -p:Version=${{ needs.prepare.outputs.version }}
-
       - name: Test
         run: dotnet test tests/OnnxTextEmbeddings.Tests/OnnxTextEmbeddings.Tests.csproj --configuration Release --no-build -p:Version=${{ needs.prepare.outputs.version }}
 
@@ -79,45 +69,40 @@ jobs:
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     environment: release
-
     permissions:
       contents: write
       id-token: write
-
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-
       - name: Restore
         run: dotnet restore OnnxTextEmbeddings.slnx
-
       - name: Build packages
         run: |
           dotnet build src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj --configuration Release --no-restore -p:Version=${{ needs.prepare.outputs.version }}
           dotnet build src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj --configuration Release --no-restore -p:Version=${{ needs.prepare.outputs.version }}
-
+          dotnet build src/OnnxTextEmbeddings.SqliteVec/OnnxTextEmbeddings.SqliteVec.csproj --configuration Release --no-restore -p:Version=${{ needs.prepare.outputs.version }}
+          dotnet build src/OnnxTextEmbeddings.SqlServer/OnnxTextEmbeddings.SqlServer.csproj --configuration Release --no-restore -p:Version=${{ needs.prepare.outputs.version }}
       - name: Pack exact release version
         run: |
           mkdir -p artifacts/nuget
           dotnet pack src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj --configuration Release --no-build --output artifacts/nuget -p:PackageVersion=${{ needs.prepare.outputs.version }} -p:Version=${{ needs.prepare.outputs.version }}
           dotnet pack src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj --configuration Release --no-build --output artifacts/nuget -p:PackageVersion=${{ needs.prepare.outputs.version }} -p:Version=${{ needs.prepare.outputs.version }}
-
+          dotnet pack src/OnnxTextEmbeddings.SqliteVec/OnnxTextEmbeddings.SqliteVec.csproj --configuration Release --no-build --output artifacts/nuget -p:PackageVersion=${{ needs.prepare.outputs.version }} -p:Version=${{ needs.prepare.outputs.version }}
+          dotnet pack src/OnnxTextEmbeddings.SqlServer/OnnxTextEmbeddings.SqlServer.csproj --configuration Release --no-build --output artifacts/nuget -p:PackageVersion=${{ needs.prepare.outputs.version }} -p:Version=${{ needs.prepare.outputs.version }}
       - name: Validate NuGet packages
         shell: pwsh
         run: ./eng/ValidatePackages.ps1 -Directory artifacts/nuget -Version '${{ needs.prepare.outputs.version }}'
-
       - name: NuGet trusted login
         uses: NuGet/login@v1
         id: login
         with:
           user: ${{ secrets.NUGET_USER }}
-
       - name: Publish packages
         shell: pwsh
         run: |
@@ -125,7 +110,6 @@ jobs:
             dotnet nuget push $_.FullName --api-key '${{ steps.login.outputs.NUGET_API_KEY }}' --source https://api.nuget.org/v3/index.json
             if ($LASTEXITCODE -ne 0) { throw "NuGet push failed for $($_.Name)" }
           }
-
       - name: Tag release
         shell: bash
         run: |
@@ -133,7 +117,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag "v${{ needs.prepare.outputs.version }}"
           git push origin "v${{ needs.prepare.outputs.version }}"
-
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

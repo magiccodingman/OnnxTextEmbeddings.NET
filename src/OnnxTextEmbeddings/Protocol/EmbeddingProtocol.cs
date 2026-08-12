@@ -129,6 +129,7 @@ public sealed record TextEmbedding
     public required EmbeddingIdentity Identity { get; init; }
     public required EmbeddingSource Source { get; init; }
     public required EmbeddingChunkInfo Chunk { get; init; }
+    public EmbeddingDimensionReductionInfo? DimensionReduction { get; init; }
     public string? Text { get; init; }
     public string? Context { get; init; }
 }
@@ -141,4 +142,5 @@ public sealed record QueryEmbedding
     public required EmbeddingIdentity Identity { get; init; }
     public required int SourceTokenCount { get; init; }
     public required int InputTokenCount { get; init; }
+    public EmbeddingDimensionReductionInfo? DimensionReduction { get; init; }
 }
