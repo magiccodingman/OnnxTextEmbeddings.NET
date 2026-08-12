@@ -1,0 +1,37 @@
+name: SQL Server 2025 vector integration
+
+on:
+  push:
+    branches-ignore:
+      - release
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlserver-vector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2025-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: OnnxTextEmbeddings!2026
+        ports:
+          - 1433:1433
+
+    env:
+      SQLSERVER_CONNECTION_STRING: Server=localhost,1433;User ID=sa;Password=OnnxTextEmbeddings!2026;Encrypt=False;TrustServerCertificate=True;Initial Catalog=master
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Run SQL Server vector integration
+        run: dotnet run --project tests/OnnxTextEmbeddings.SqlServerIntegration/OnnxTextEmbeddings.SqlServerIntegration.csproj --configuration Release

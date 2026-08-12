@@ -5,9 +5,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
-    <ProjectReference Include="../../src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj" />
-    <PackageReference Include="Npgsql" />
-    <PackageReference Include="Pgvector" />
+    <ProjectReference Include="../../src/OnnxTextEmbeddings.SqliteVec/OnnxTextEmbeddings.SqliteVec.csproj" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
   </ItemGroup>
