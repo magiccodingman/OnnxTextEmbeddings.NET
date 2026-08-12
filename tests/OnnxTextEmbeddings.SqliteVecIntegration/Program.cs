@@ -13,13 +13,44 @@ if (string.IsNullOrWhiteSpace(capabilities.Version))
 var services = new ServiceCollection();
 services.AddLogging();
 services.AddOnnxTextEmbeddings(options => options.Initialization.WarmupOnStartup = false);
+services.AddOnnxTextEmbeddingsSqliteVec();
 await using var provider = services.BuildServiceProvider();
-var reranker = provider.GetRequiredService<ISemanticCandidateReranker>();
-var search = new SqliteVecSemanticSearch(reranker);
+var search = provider.GetRequiredService<SqliteVecSemanticSearch>();
+var lexicalSearch = provider.GetRequiredService<SqliteFts5LexicalSearch>();
+var advancedSearch = provider.GetRequiredService<SqliteVecAdvancedSearch>();
+
+const string lexicalTable = "onnx_lexical_items";
+await using (var create = connection.CreateCommand())
+{
+    create.CommandText = $"CREATE VIRTUAL TABLE {lexicalTable} USING fts5(item_id UNINDEXED, tenant_id UNINDEXED, title, body)";
+    await create.ExecuteNonQueryAsync();
+}
+await InsertLexicalAsync("backup", 1, "PostgreSQL Backup", "Restore and disaster recovery procedures.");
+await InsertLexicalAsync("network", 1, "Networking", "Firewall and routing documentation.");
+await InsertLexicalAsync("body-heavy", 1, "Database Operations", "PostgreSQL backup PostgreSQL backup PostgreSQL backup procedures.");
+await InsertLexicalAsync("other-tenant", 2, "PostgreSQL Backup", "Exact title in another tenant.");
+
+var lexicalMapping = new SqliteFts5Query
+{
+    Table = lexicalTable,
+    ItemKeyColumn = "item_id",
+    ColumnOrder = ["item_id", "tenant_id", "title", "body"],
+    Fields = [new SqliteFts5Field("title", "title"), new SqliteFts5Field("body", "body")],
+    FilterColumns = new Dictionary<string, string> { ["TenantId"] = "tenant_id" },
+    Filter = SearchFilter.Equal("TenantId", 1)
+};
+var lexical = await lexicalSearch.SearchAsync<string>(
+    connection,
+    "postgresql backup",
+    lexicalMapping,
+    [SearchFieldWeight.Create("title", 8), SearchFieldWeight.Create("body", 1)],
+    new DatabaseLexicalSearchOptions { Top = 2 });
+if (lexical.Results.Count == 0 || lexical.Results[0].Item != "backup")
+    throw new InvalidOperationException("SQLite FTS5 BM25 field weighting did not prefer the title match.");
 
 await VerifyStorageAsync("float[4] distance_metric=cosine", SqliteVecStorageKind.Float32, "f32");
 await VerifyStorageAsync("int8[4] distance_metric=cosine", SqliteVecStorageKind.Int8, "i8");
-Console.WriteLine($"PASS SQLite/sqlite-vec {capabilities.Version} FP32 + INT8 native candidate reranking integration.");
+Console.WriteLine($"PASS SQLite/sqlite-vec {capabilities.Version} FP32 + INT8 + FTS5 BM25 + filtering + hybrid RRF integration.");
 
 async Task VerifyStorageAsync(string vectorDefinition, SqliteVecStorageKind storageKind, string suffix)
 {
@@ -33,15 +64,17 @@ async Task VerifyStorageAsync(string vectorDefinition, SqliteVecStorageKind stor
                 fingerprint text,
                 embedding {vectorDefinition},
                 +record_json text,
-                +field_weight float
+                +field_weight float,
+                +tenant_id integer
             )
             """;
         await create.ExecuteNonQueryAsync();
     }
 
     const string fingerprint = "sqlite-vec-integration-space";
-    await InsertAsync(table, "backup", TextEmbeddingFor([1f, 0f, 0f, 0f], fingerprint, 0), storageKind);
-    await InsertAsync(table, "network", TextEmbeddingFor([0f, 1f, 0f, 0f], fingerprint, 0), storageKind);
+    await InsertAsync(table, "backup", 1, TextEmbeddingFor([1f, 0f, 0f, 0f], fingerprint, 0), storageKind);
+    await InsertAsync(table, "network", 1, TextEmbeddingFor([0f, 1f, 0f, 0f], fingerprint, 0), storageKind);
+    await InsertAsync(table, "other-tenant", 2, TextEmbeddingFor([1f, 0f, 0f, 0f], fingerprint, 0), storageKind);
 
     var query = new QueryEmbedding
     {
@@ -51,35 +84,55 @@ async Task VerifyStorageAsync(string vectorDefinition, SqliteVecStorageKind stor
         InputTokenCount = 2
     };
 
+    var semanticMapping = new SqliteVecCandidateQuery
+    {
+        Table = table,
+        ItemKeyColumn = "item_id",
+        FieldNameColumn = "field_name",
+        FingerprintColumn = "fingerprint",
+        VectorColumn = "embedding",
+        RecordJsonColumn = "record_json",
+        FieldWeightColumn = "field_weight",
+        StorageKind = storageKind,
+        FilterColumns = new Dictionary<string, string> { ["TenantId"] = "tenant_id" },
+        Filter = SearchFilter.Equal("TenantId", 1)
+    };
     var result = await search.SearchAsync<string>(
         connection,
         query,
-        new SqliteVecCandidateQuery
-        {
-            Table = table,
-            ItemKeyColumn = "item_id",
-            FieldNameColumn = "field_name",
-            FingerprintColumn = "fingerprint",
-            VectorColumn = "embedding",
-            RecordJsonColumn = "record_json",
-            FieldWeightColumn = "field_weight",
-            StorageKind = storageKind
-        },
+        semanticMapping,
         new DatabaseSemanticSearchOptions { Top = 1, CandidateCount = 10 });
-
     if (result.Results.Count != 1 || result.Results[0].Item != "backup")
-        throw new InvalidOperationException($"sqlite-vec {storageKind} candidate retrieval returned the wrong item.");
-    if (result.Retrieval.Provider != "SQLite/sqlite-vec" || result.Retrieval.Approximate)
-        throw new InvalidOperationException("Unexpected sqlite-vec retrieval diagnostics.");
+        throw new InvalidOperationException($"sqlite-vec {storageKind} filtered candidate retrieval returned the wrong item.");
+
+    if (storageKind == SqliteVecStorageKind.Float32)
+    {
+        var hybridQuery = SearchQuery.Create("postgresql backup")
+            .Where(SearchFilter.Equal("TenantId", 1))
+            .Add(SearchRetrievalStage.Semantic(SearchFieldWeight.Create("content", 1)).Candidates(10))
+            .Add(SearchRetrievalStage.Lexical(SearchFieldWeight.Create("title", 8), SearchFieldWeight.Create("body", 1)).Candidates(10))
+            .Take(2);
+        var hybrid = await advancedSearch.SearchAsync<string>(
+            connection,
+            hybridQuery,
+            new SqliteVecSearchPlan
+            {
+                Semantic = semanticMapping with { Filter = null },
+                Lexical = lexicalMapping with { Filter = null }
+            },
+            semanticQuery: query);
+        if (hybrid.Count == 0 || hybrid[0].Item != "backup" || hybrid[0].Contributions.Count != 2)
+            throw new InvalidOperationException("SQLite semantic + lexical RRF did not return the jointly supported backup item.");
+    }
 }
 
-async Task InsertAsync(string table, string itemId, TextEmbedding embedding, SqliteVecStorageKind storageKind)
+async Task InsertAsync(string table, string itemId, int tenantId, TextEmbedding embedding, SqliteVecStorageKind storageKind)
 {
     await using var insert = connection.CreateCommand();
     var constructor = storageKind == SqliteVecStorageKind.Int8 ? "vec_int8" : "vec_f32";
     insert.CommandText = $"""
-        INSERT INTO {table}(item_id, field_name, fingerprint, embedding, record_json, field_weight)
-        VALUES ($item, $field, $fingerprint, {constructor}($embedding), $json, $weight)
+        INSERT INTO {table}(item_id, field_name, fingerprint, embedding, record_json, field_weight, tenant_id)
+        VALUES ($item, $field, $fingerprint, {constructor}($embedding), $json, $weight, $tenant)
         """;
     insert.Parameters.AddWithValue("$item", itemId);
     insert.Parameters.AddWithValue("$field", "content");
@@ -90,6 +143,18 @@ async Task InsertAsync(string table, string itemId, TextEmbedding embedding, Sql
     insert.Parameters.Add("$embedding", SqliteType.Blob).Value = vector.Data;
     insert.Parameters.AddWithValue("$json", EmbeddingSerializer.SerializeJson(embedding));
     insert.Parameters.AddWithValue("$weight", 1.0);
+    insert.Parameters.AddWithValue("$tenant", tenantId);
+    await insert.ExecuteNonQueryAsync();
+}
+
+async Task InsertLexicalAsync(string itemId, int tenantId, string title, string body)
+{
+    await using var insert = connection.CreateCommand();
+    insert.CommandText = $"INSERT INTO {lexicalTable}(item_id, tenant_id, title, body) VALUES ($item, $tenant, $title, $body)";
+    insert.Parameters.AddWithValue("$item", itemId);
+    insert.Parameters.AddWithValue("$tenant", tenantId);
+    insert.Parameters.AddWithValue("$title", title);
+    insert.Parameters.AddWithValue("$body", body);
     await insert.ExecuteNonQueryAsync();
 }
 

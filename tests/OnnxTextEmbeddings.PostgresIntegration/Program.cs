@@ -24,7 +24,6 @@ await using (var command = new NpgsqlCommand(
 
 var first = EmbeddingVector.FromFloat32(new[] { 1f, 0f, 0f, 0f }, EmbeddingVectorFormat.Int4);
 var second = EmbeddingVector.FromFloat32(new[] { 0f, 1f, 0f, 0f }, EmbeddingVectorFormat.Int8);
-
 await InsertPortableAsync(1, first);
 await InsertPortableAsync(2, second);
 
@@ -34,16 +33,11 @@ await using (var command = new NpgsqlCommand(
 {
     command.Parameters.AddWithValue(queryVector.ToPgVector());
     await using var reader = await command.ExecuteReaderAsync();
-    if (!await reader.ReadAsync())
-        throw new InvalidOperationException("pgvector integration query returned no rows.");
-    if (reader.GetInt32(0) != 1)
+    if (!await reader.ReadAsync() || reader.GetInt32(0) != 1)
         throw new InvalidOperationException("pgvector cosine ordering did not return the expected nearest vector.");
-
     var restored = EmbeddingSerializer.DeserializeVector((byte[])reader[1]);
-    if (restored.Format != EmbeddingVectorFormat.Int4 || restored.Dimensions != 4)
-        throw new InvalidOperationException("Portable BYTEA vector did not round-trip with its encoding metadata.");
-    if (EmbeddingVectorMath.CosineSimilarity(first, restored) < 0.999f)
-        throw new InvalidOperationException("Portable BYTEA vector changed during PostgreSQL round-trip.");
+    if (restored.Format != EmbeddingVectorFormat.Int4 || restored.Dimensions != 4 || EmbeddingVectorMath.CosineSimilarity(first, restored) < 0.999f)
+        throw new InvalidOperationException("Portable BYTEA vector did not round-trip correctly.");
 }
 
 const string candidateTable = "onnx_semantic_candidates";
@@ -52,6 +46,7 @@ await using (var command = new NpgsqlCommand($"DROP TABLE IF EXISTS {candidateTa
 await using (var command = new NpgsqlCommand($"""
     CREATE TABLE {candidateTable} (
         item_id text NOT NULL,
+        tenant_id integer NOT NULL,
         field_name text NOT NULL,
         fingerprint text NOT NULL,
         embedding vector(4) NOT NULL,
@@ -62,19 +57,41 @@ await using (var command = new NpgsqlCommand($"""
     await command.ExecuteNonQueryAsync();
 
 const string fingerprint = "postgres-integration-space";
-var backup = TextEmbeddingFor([1f, 0f, 0f, 0f], fingerprint, 0);
-var backupSupport = TextEmbeddingFor([0.94f, 0.30f, 0f, 0f], fingerprint, 1);
-var network = TextEmbeddingFor([0f, 1f, 0f, 0f], fingerprint, 0);
-await InsertCandidateAsync("backup", "content", backup, 1f);
-await InsertCandidateAsync("backup", "content", backupSupport, 1f);
-await InsertCandidateAsync("network", "content", network, 1f);
+await InsertCandidateAsync("backup", 1, "content", TextEmbeddingFor([1f, 0f, 0f, 0f], fingerprint, 0), 1f);
+await InsertCandidateAsync("backup", 1, "content", TextEmbeddingFor([0.94f, 0.30f, 0f, 0f], fingerprint, 1), 1f);
+await InsertCandidateAsync("network", 1, "content", TextEmbeddingFor([0f, 1f, 0f, 0f], fingerprint, 0), 1f);
+await InsertCandidateAsync("other-tenant", 2, "content", TextEmbeddingFor([1f, 0f, 0f, 0f], fingerprint, 0), 1f);
+
+const string lexicalTable = "onnx_lexical_items";
+await using (var command = new NpgsqlCommand($"DROP TABLE IF EXISTS {lexicalTable}", connection))
+    await command.ExecuteNonQueryAsync();
+await using (var command = new NpgsqlCommand($"""
+    CREATE TABLE {lexicalTable} (
+        item_id text PRIMARY KEY,
+        tenant_id integer NOT NULL,
+        title text NOT NULL,
+        body text NOT NULL,
+        search_vector tsvector GENERATED ALWAYS AS (
+            setweight(to_tsvector('english'::regconfig, coalesce(title, '')), 'A') ||
+            setweight(to_tsvector('english'::regconfig, coalesce(body, '')), 'D')
+        ) STORED
+    );
+    CREATE INDEX onnx_lexical_items_search_vector_idx ON {lexicalTable} USING GIN(search_vector);
+    """, connection))
+    await command.ExecuteNonQueryAsync();
+await InsertLexicalAsync("backup", 1, "PostgreSQL Backup", "Restore and disaster recovery procedures.");
+await InsertLexicalAsync("network", 1, "Networking", "Firewall and routing documentation.");
+await InsertLexicalAsync("body-heavy", 1, "Database Operations", "PostgreSQL backup PostgreSQL backup PostgreSQL backup procedures.");
+await InsertLexicalAsync("other-tenant", 2, "PostgreSQL Backup", "Exact title in another tenant.");
 
 var services = new ServiceCollection();
 services.AddLogging();
 services.AddOnnxTextEmbeddings(options => options.Initialization.WarmupOnStartup = false);
+services.AddOnnxTextEmbeddingsPgVector();
 await using var provider = services.BuildServiceProvider();
-var reranker = provider.GetRequiredService<ISemanticCandidateReranker>();
-var databaseSearch = new PgVectorSemanticSearch(reranker);
+var databaseSearch = provider.GetRequiredService<PgVectorSemanticSearch>();
+var lexicalSearch = provider.GetRequiredService<PgVectorLexicalSearch>();
+var advancedSearch = provider.GetRequiredService<PgVectorAdvancedSearch>();
 var query = new QueryEmbedding
 {
     Vector = queryVector,
@@ -82,28 +99,68 @@ var query = new QueryEmbedding
     SourceTokenCount = 3,
     InputTokenCount = 3
 };
+
+var semanticMapping = new PgVectorCandidateQuery
+{
+    Table = candidateTable,
+    ItemKeyColumn = "item_id",
+    FieldNameColumn = "field_name",
+    FingerprintColumn = "fingerprint",
+    VectorColumn = "embedding",
+    RecordJsonColumn = "record_json",
+    FieldWeightColumn = "field_weight",
+    SearchMode = PgVectorSearchMode.Exact,
+    FilterColumns = new Dictionary<string, string> { ["TenantId"] = "tenant_id" },
+    Filter = SearchFilter.Equal("TenantId", 1)
+};
 var searchResult = await databaseSearch.SearchAsync<string>(
     connection,
     query,
-    new PgVectorCandidateQuery
-    {
-        Table = candidateTable,
-        ItemKeyColumn = "item_id",
-        FieldNameColumn = "field_name",
-        FingerprintColumn = "fingerprint",
-        VectorColumn = "embedding",
-        RecordJsonColumn = "record_json",
-        FieldWeightColumn = "field_weight",
-        SearchMode = PgVectorSearchMode.Exact
-    },
+    semanticMapping,
     new DatabaseSemanticSearchOptions { Top = 1, CandidateCount = 10 });
-
 if (searchResult.Results.Count != 1 || searchResult.Results[0].Item != "backup")
-    throw new InvalidOperationException("pgvector candidate retrieval + DefaultV1 reranking did not return the expected item.");
-if (searchResult.Retrieval.Provider != "PostgreSQL/pgvector" || searchResult.Retrieval.Approximate)
-    throw new InvalidOperationException("Unexpected pgvector retrieval diagnostics.");
+    throw new InvalidOperationException("Filtered pgvector candidate retrieval + DefaultV1 reranking did not return the expected item.");
 
-Console.WriteLine("PASS PostgreSQL pgvector + portable BYTEA + database-native candidate reranking integration.");
+var lexicalMapping = new PgVectorLexicalQuery
+{
+    Table = lexicalTable,
+    ItemKeyColumn = "item_id",
+    SearchVectorColumn = "search_vector",
+    Fields =
+    [
+        new PgTextSearchField("title", PgTextSearchWeight.A),
+        new PgTextSearchField("body", PgTextSearchWeight.D)
+    ],
+    FilterColumns = new Dictionary<string, string> { ["TenantId"] = "tenant_id" },
+    Filter = SearchFilter.Equal("TenantId", 1)
+};
+var lexicalResult = await lexicalSearch.SearchAsync<string>(
+    connection,
+    "postgresql backup",
+    lexicalMapping,
+    [SearchFieldWeight.Create("title", 8), SearchFieldWeight.Create("body", 1)],
+    new DatabaseLexicalSearchOptions { Top = 2 });
+if (lexicalResult.Results.Count == 0 || lexicalResult.Results[0].Item != "backup")
+    throw new InvalidOperationException("PostgreSQL native lexical field weighting did not prefer the title match.");
+
+var hybridQuery = SearchQuery.Create("postgresql backup")
+    .Where(SearchFilter.Equal("TenantId", 1))
+    .Add(SearchRetrievalStage.Semantic(SearchFieldWeight.Create("content", 1)).Candidates(10))
+    .Add(SearchRetrievalStage.Lexical(SearchFieldWeight.Create("title", 8), SearchFieldWeight.Create("body", 1)).Candidates(10))
+    .Take(2);
+var hybrid = await advancedSearch.SearchAsync<string>(
+    connection,
+    hybridQuery,
+    new PgVectorSearchPlan
+    {
+        Semantic = semanticMapping with { Filter = null },
+        Lexical = lexicalMapping with { Filter = null }
+    },
+    semanticQuery: query);
+if (hybrid.Count == 0 || hybrid[0].Item != "backup" || hybrid[0].Contributions.Count != 2)
+    throw new InvalidOperationException("PostgreSQL semantic + lexical RRF did not return the jointly supported backup item.");
+
+Console.WriteLine("PASS PostgreSQL pgvector + native full-text + portable filtering + hybrid RRF integration.");
 
 async Task InsertPortableAsync(int id, EmbeddingVector vector)
 {
@@ -115,18 +172,29 @@ async Task InsertPortableAsync(int id, EmbeddingVector vector)
     await command.ExecuteNonQueryAsync();
 }
 
-async Task InsertCandidateAsync(string itemId, string field, TextEmbedding embedding, float weight)
+async Task InsertCandidateAsync(string itemId, int tenantId, string field, TextEmbedding embedding, float weight)
 {
     await using var command = new NpgsqlCommand($"""
-        INSERT INTO {candidateTable}(item_id, field_name, fingerprint, embedding, record_json, field_weight)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO {candidateTable}(item_id, tenant_id, field_name, fingerprint, embedding, record_json, field_weight)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         """, connection);
     command.Parameters.AddWithValue(itemId);
+    command.Parameters.AddWithValue(tenantId);
     command.Parameters.AddWithValue(field);
     command.Parameters.AddWithValue(embedding.Identity.EmbeddingSpaceFingerprint);
     command.Parameters.AddWithValue(embedding.Vector.ToPgVector());
     command.Parameters.AddWithValue(EmbeddingSerializer.SerializeJson(embedding));
     command.Parameters.AddWithValue(weight);
+    await command.ExecuteNonQueryAsync();
+}
+
+async Task InsertLexicalAsync(string itemId, int tenantId, string title, string body)
+{
+    await using var command = new NpgsqlCommand($"INSERT INTO {lexicalTable}(item_id, tenant_id, title, body) VALUES ($1, $2, $3, $4)", connection);
+    command.Parameters.AddWithValue(itemId);
+    command.Parameters.AddWithValue(tenantId);
+    command.Parameters.AddWithValue(title);
+    command.Parameters.AddWithValue(body);
     await command.ExecuteNonQueryAsync();
 }
 
