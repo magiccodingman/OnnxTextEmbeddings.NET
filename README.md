@@ -12,10 +12,12 @@ OnnxTextEmbeddings.NET is aimed at wikis, documentation, note apps, games, local
 dotnet add package OnnxTextEmbeddings.NET
 ```
 
-Optional PostgreSQL/pgvector helpers live in a separate package:
+Optional database-native search integrations are separate packages, so core never drags in database dependencies you do not use:
 
 ```bash
 dotnet add package OnnxTextEmbeddings.NET.PgVector
+dotnet add package OnnxTextEmbeddings.NET.SqliteVec
+dotnet add package OnnxTextEmbeddings.NET.SqlServer
 ```
 
 ## Five-minute start
@@ -41,6 +43,26 @@ var results = await semanticSearch.SearchAsync(
     page => page.Embeddings,
     new SemanticSearchRequest { Top = 10 });
 ```
+
+## Database-native search
+
+For larger persisted working sets, PostgreSQL/pgvector, SQLite/sqlite-vec, and SQL Server 2025/Azure SQL can keep broad vector candidate search inside the database.
+
+```text
+relational filters + native vector KNN
+                ↓
+        bounded chunk candidates
+                ↓
+      shared core DefaultV1 reranking
+                ↓
+          final item results
+```
+
+The database integrations deliberately do **not** reimplement semantic scoring in SQL. They retrieve plausible direct chunks, then the same `DefaultV1` implementation used by in-memory search applies chunk-length confidence, bounded supporting evidence, and semantic-field weights.
+
+Candidate retrieval defaults to over-fetching `max(100, Top × 10)` chunks so final item scoring has enough evidence. Every provider filters by the query's embedding-space fingerprint during native retrieval.
+
+Plain SQLite remains valid generic persistence; **sqlite-vec is the official SQLite-native search integration**. See [Database-native semantic search](docs/database-search.md).
 
 ## Per-call token and vector overrides
 
@@ -225,9 +247,35 @@ var cosine = EmbeddingVectorMath.CosineSimilarity(
     single.Vector);
 ```
 
-The reduced document/query fingerprints match only when the same base space, reduction profile, source dimensions, and output dimensions are used.
+Direct chunk vectors can also be reduced without aggregation:
+
+```csharp
+var reducedChunk = chunks[0].ReduceDimensions(1024);
+```
+
+The reduced direct chunk preserves its source/chunk metadata and enters the same deterministic child space as a query reduced with the same profile.
 
 See [Single-embedding aggregation](docs/single-embedding.md) and [Dimension reduction](docs/dimension-reduction.md).
+
+## Native AOT and non-.NET interoperability
+
+The core package declares Native AOT compatibility and is continuously AOT-published/tested on Linux, Windows, and macOS.
+
+The repository also contains a separate `OnnxTextEmbeddings.Native` facade that publishes the canonical C# implementation as a Native AOT shared library with a versioned C ABI:
+
+```text
+OnnxTextEmbeddings.Native
+        ↓
+.so / .dll / .dylib
+        ↓
+stable C ABI
+        ↓
+Rust / C / C++ / Go / Zig / Python FFI / other bindings
+```
+
+This native facade is intentionally **not a NuGet package**. The project maintains the C ABI, public header, and cross-platform C interoperability tests; third-party language bindings are welcome without implying that every language wrapper becomes a first-party SDK.
+
+See [Native AOT compatibility](docs/native-aot.md) and [Native interoperability](docs/native-interop.md).
 
 ## Configuration defaults
 
@@ -252,7 +300,7 @@ Scoring profile               DefaultV1
 
 ## Persistence
 
-The core package owns no database. Store `TextEmbedding` or `SingleEmbedding` records wherever the application already stores data: memory, SQLite BLOBs, SQL Server `VARBINARY`, PostgreSQL `BYTEA`, JSON/files, or pgvector through the optional adapter.
+The core package owns no database. Store `TextEmbedding` or `SingleEmbedding` records wherever the application already stores data: memory, SQLite BLOBs, SQL Server `VARBINARY`, PostgreSQL `BYTEA`, JSON/files, or a native vector column through one of the optional database adapters.
 
 ## Documentation
 
@@ -270,16 +318,21 @@ The core package owns no database. Store `TextEmbedding` or `SingleEmbedding` re
 - [Chunking](docs/chunking.md)
 - [Semantic search](docs/semantic-search.md)
 - [DefaultV1 scoring](docs/semantic-scoring.md)
+- [Database-native semantic search](docs/database-search.md)
 - [Persistence](docs/persistence.md)
-- [SQLite](docs/sqlite.md)
+- [SQLite persistence](docs/sqlite.md)
+- [SQLite/sqlite-vec](docs/sqlite-vec.md)
 - [PostgreSQL/pgvector](docs/postgres.md)
+- [SQL Server 2025 / Azure SQL](docs/sql-server.md)
+- [Native AOT compatibility](docs/native-aot.md)
+- [Native interoperability / C ABI](docs/native-interop.md)
 - [Performance](docs/performance.md)
 - [Deployment](docs/deployment.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
 ## Scope
 
-This library is intentionally not a RAG framework, vector database, ingestion platform, PDF parser, crawler, GPU framework, or distributed embedding service. It is a focused way to add high-quality local text embeddings and good small-scale semantic search to an ordinary .NET application.
+This library is intentionally not a RAG framework, vector database, ingestion platform, PDF parser, crawler, GPU framework, or distributed embedding service. It is a focused way to add high-quality local text embeddings and good small-scale semantic search to an ordinary .NET application—or, through the Native AOT facade, to another runtime that wants to bind to the same engine.
 
 ## License
 

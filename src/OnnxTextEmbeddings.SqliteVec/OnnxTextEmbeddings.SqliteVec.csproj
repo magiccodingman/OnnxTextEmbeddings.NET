@@ -1,20 +1,23 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <PackageId>OnnxTextEmbeddings.NET.PgVector</PackageId>
-    <Description>PostgreSQL/pgvector native candidate search and conversion helpers for OnnxTextEmbeddings.NET.</Description>
-    <PackageTags>onnx;embeddings;semantic-search;pgvector;postgresql</PackageTags>
+    <PackageId>OnnxTextEmbeddings.NET.SqliteVec</PackageId>
+    <Description>SQLite/sqlite-vec native semantic candidate search for OnnxTextEmbeddings.NET.</Description>
+    <PackageTags>onnx;embeddings;semantic-search;sqlite;sqlite-vec</PackageTags>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>128x128_compressed.png</PackageIcon>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <IsPackable>true</IsPackable>
+    <!-- sqlite-vec is intentionally isolated behind this adapter while upstream remains pre-v1. The adapter pins the
+         exact tested native wrapper version and continuously integration-tests it across supported desktop OSes. -->
+    <NoWarn>$(NoWarn);NU5104</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
-    <PackageReference Include="Pgvector" />
-    <PackageReference Include="Pgvector.EntityFrameworkCore" />
-    <PackageReference Include="Npgsql" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" />
+    <PackageReference Include="sqlite-vec" VersionOverride="[0.1.7-alpha.2.1]" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
   </ItemGroup>
   <ItemGroup>

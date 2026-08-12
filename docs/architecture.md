@@ -1,6 +1,6 @@
 # Architecture
 
-The package pipeline is:
+The core embedding pipeline is:
 
 ```text
 Model source
@@ -85,6 +85,8 @@ A normal recoverable runtime failure can retry its request once. Memory-pressure
 
 The vector encoding and embedding record schema are explicitly versioned. Quantized vector bytes are self-describing. Document records preserve the model-space fingerprint and the historical token capacity actually used when the chunk was created—including per-call chunk overrides.
 
+A direct `TextEmbedding` may also carry `DimensionReduction` metadata. Reducing one direct chunk changes its vector space but does not turn it into an aggregate or discard its source/chunk metadata.
+
 ## Single-embedding aggregation
 
 `CombineToSingle` operates entirely after inference. It does not require source text or another model.
@@ -95,9 +97,11 @@ Aggregation itself does not create a new coordinate system: a native-dimensional
 
 ## Dimension reduction
 
-Dimension reduction occurs only after aggregation. `SRHT-v1` is deterministic and supports non-power-of-two source dimensions by internal zero-padding for the Hadamard transform.
+`SRHT-v1` is deterministic and supports non-power-of-two source dimensions by internal zero-padding for the Hadamard transform.
 
-Reduction *does* create a new coordinate space, so the embedding-space fingerprint is deterministically derived from the base fingerprint, reduction profile, source dimensions, and output dimensions. Query embeddings must apply the same transform before cosine comparison.
+Aggregation reduces dimensions only after its full-dimensional semantic decision. Direct `TextEmbedding` and `QueryEmbedding` records may also be reduced independently when a storage/search backend has a native dimensional limit.
+
+Reduction creates a new coordinate space, so the embedding-space fingerprint is deterministically derived from the base fingerprint, reduction profile, source dimensions, and output dimensions. Queries and document chunks must apply the same transform before cosine comparison.
 
 ## Semantic ranking
 
@@ -105,6 +109,44 @@ Search operates on stored direct chunk vectors and does not require ONNX inferen
 
 `SingleEmbedding` is deliberately not silently treated as a `TextEmbedding`: aggregate source-token count describes all original content compressed into that vector and must not be interpreted as one direct chunk's length confidence.
 
+## Database-native candidate search
+
+Core also defines a database-candidate boundary:
+
+```text
+QueryEmbedding
+      ↓
+provider-native relational filters + vector search
+      ↓
+SemanticCandidate<TKey>[]
+      ↓
+ISemanticCandidateReranker
+      ↓
+canonical DefaultV1
+```
+
+The database adapters own only broad candidate retrieval. They do not reimplement DefaultV1 in SQL.
+
+Official native-search adapters are isolated projects/packages:
+
+```text
+OnnxTextEmbeddings.NET.PgVector
+OnnxTextEmbeddings.NET.SqliteVec
+OnnxTextEmbeddings.NET.SqlServer
+```
+
+PostgreSQL/pgvector, sqlite-vec, and SQL Server/Azure SQL can therefore use their native vector engines while producing the same final ranking semantics as in-memory search.
+
+Plain SQLite remains valid storage and can still feed the in-memory scorer; sqlite-vec is the official SQLite-native search path.
+
+## Native AOT boundary
+
+Core declares Native AOT compatibility and uses source-generated JSON metadata for its persisted protocol/cache records.
+
+A separate non-NuGet `OnnxTextEmbeddings.Native` project publishes the managed implementation as a Native AOT shared library with a stable C ABI. The C boundary uses opaque handles, explicit UTF-8 pointer/length inputs, numeric status codes, library-owned output buffers, and explicit ABI versioning.
+
+This keeps unmanaged interoperability concerns out of the idiomatic managed API while allowing C, Rust, C++, Go, Zig, Python FFI, and other runtimes to bind to the same engine.
+
 ## Storage boundary
 
-Core has no persistence dependency. PostgreSQL helpers are isolated in `OnnxTextEmbeddings.NET.PgVector`; SQLite, SQL Server, files, and other stores can persist portable core records directly.
+Core has no persistence dependency. Portable records can be stored in SQLite, SQL Server, PostgreSQL, files, or another application store. Native vector-search dependencies stay in their optional provider projects, and the Native AOT facade stays outside NuGet packaging entirely.

@@ -25,7 +25,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ModelCacheManager>();
         services.AddSingleton<TextEmbeddingService>();
         services.AddSingleton<ITextEmbeddingService>(sp => sp.GetRequiredService<TextEmbeddingService>());
-        services.AddSingleton<ISemanticSearch, SemanticSearchService>();
+        services.AddSingleton<SemanticSearchService>();
+        services.AddSingleton<ISemanticSearch>(sp => sp.GetRequiredService<SemanticSearchService>());
+        services.AddSingleton<ISemanticCandidateReranker>(sp => sp.GetRequiredService<SemanticSearchService>());
         services.AddSingleton<IHostedService, EmbeddingWarmupHostedService>();
         return services;
     }

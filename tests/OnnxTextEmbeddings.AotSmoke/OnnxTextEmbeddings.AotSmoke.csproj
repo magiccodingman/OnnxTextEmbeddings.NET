@@ -5,9 +5,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj" />
-    <ProjectReference Include="../../src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj" />
-    <PackageReference Include="Npgsql" />
-    <PackageReference Include="Pgvector" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
   </ItemGroup>

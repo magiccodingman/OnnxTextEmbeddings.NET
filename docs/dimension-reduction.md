@@ -1,11 +1,11 @@
 # Embedding dimension reduction
 
-Single-embedding aggregation may optionally return fewer dimensions than were supplied.
+Embedding vectors may optionally be returned in fewer dimensions than were supplied.
 
-Dimension reduction is deliberately separate from semantic aggregation and numeric/storage conversion:
+Dimension reduction is separate from semantic aggregation and numeric/storage conversion:
 
 ```text
-full-dimensional FP32 semantic result
+full-dimensional semantic representation
         ↓
 dimension reduction
         ↓
@@ -15,6 +15,28 @@ FP32 / FP16 / INT8 / INT4 storage conversion
 ```
 
 The library never increases dimensionality or presents zero-padding as semantic recovery.
+
+## Direct document chunks
+
+Individual `TextEmbedding` records can now be reduced without aggregating a document:
+
+```csharp
+var reducedChunk = chunk.ReduceDimensions(
+    1024,
+    EmbeddingVectorFormat.Float32);
+```
+
+Source ranges, chunk metadata, text, and context remain attached to the same direct chunk. `DimensionReduction` records the transform and the identity receives the deterministic reduced-space fingerprint.
+
+This is important for database backends with native dimensional limits. It preserves multi-vector retrieval rather than forcing a long document through `CombineToSingle()`.
+
+Queries use the same operation:
+
+```csharp
+var reducedQuery = query.ReduceDimensions(1024);
+```
+
+When base fingerprint, source dimensions, profile, and target dimensions match, the reduced document/query fingerprints match.
 
 ## SRHT-v1
 
@@ -56,13 +78,13 @@ A request for `8192` from those 4095 supplied dimensions still fails.
 
 `SRHT-v1` is a persistence protocol, not an implementation-detail random projection.
 
-Its sign choices and coordinate ordering are derived from SHA-256 domain-separated values defined by the profile and source dimensionality. They do not use `System.Random` or runtime-dependent seeded random-number behavior.
+Its sign choices and coordinate ordering are derived from SHA-256 domain-separated values defined by the profile and source dimensionality. They do not use `System.Random` or runtime-dependent seeded random behavior.
 
-Changing those rules in the future requires a new profile such as `SRHT-v2`.
+Changing those rules requires a new profile such as `SRHT-v2`.
 
 ## Reduced spaces are new embedding spaces
 
-Dimension reduction changes the coordinate system. The output identity therefore receives a deterministic child embedding-space fingerprint containing:
+Dimension reduction changes the coordinate system. The output identity therefore receives a deterministic child fingerprint containing:
 
 ```text
 base embedding-space fingerprint
@@ -79,40 +101,6 @@ These are different spaces:
 2048 -> SRHT-v1 -> 512
 2048 -> future SRHT-v2 -> 512
 2048 -> model-native Matryoshka -> 512
-```
-
-## Query compatibility
-
-Queries compared with reduced document vectors must receive the exact same transform.
-
-```csharp
-var chunks = await embeddingService.EmbedDocumentAsync(text);
-var document = chunks.CombineToSingle(new SingleEmbeddingOptions
-{
-    OutputDimensions = 512,
-    OutputFormat = EmbeddingVectorFormat.Int8
-});
-
-var query = await embeddingService.EmbedQueryAsync("database restore");
-var reducedQuery = query.ReduceDimensions(512);
-
-if (document.Identity.EmbeddingSpaceFingerprint !=
-    reducedQuery.Identity.EmbeddingSpaceFingerprint)
-{
-    throw new InvalidOperationException("Embedding spaces differ.");
-}
-
-var cosine = EmbeddingVectorMath.CosineSimilarity(
-    reducedQuery.Vector,
-    document.Vector);
-```
-
-`ReduceDimensions` may also select a query storage format:
-
-```csharp
-var reduced = query.ReduceDimensions(
-    512,
-    EmbeddingVectorFormat.Float16);
 ```
 
 Numeric format does not change the embedding-space fingerprint; the coordinate transform does.

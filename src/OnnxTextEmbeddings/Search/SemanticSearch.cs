@@ -81,7 +81,7 @@ public interface ISemanticSearch
 
 internal sealed class SemanticSearchService(
     ITextEmbeddingService embeddingService,
-    OnnxTextEmbeddingsOptions options) : ISemanticSearch
+    OnnxTextEmbeddingsOptions options) : ISemanticSearch, ISemanticCandidateReranker
 {
     public async Task<IReadOnlyList<SemanticSearchResult<T>>> SearchAsync<T>(
         string query,
@@ -143,6 +143,65 @@ internal sealed class SemanticSearchService(
             results.Add(result);
         results.Sort((a, b) => b.Score.CompareTo(a.Score));
         return Task.FromResult<IReadOnlyList<SemanticSearchResult<T>>>(results);
+    }
+
+    public async Task<DatabaseSemanticSearchResult<TKey>> RerankAsync<TKey>(
+        QueryEmbedding query,
+        SemanticCandidateBatch<TKey> candidates,
+        DatabaseSemanticSearchOptions? options = null,
+        CancellationToken cancellationToken = default)
+        where TKey : notnull
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(candidates);
+        options ??= new DatabaseSemanticSearchOptions();
+        _ = options.ResolveCandidateCount();
+
+        var items = candidates.Candidates
+            .GroupBy(candidate => candidate.ItemKey)
+            .Select(group => new CandidateItem<TKey>(group.Key, CreateFields(group)))
+            .ToArray();
+
+        var ranked = await SearchFieldsAsync(
+            query,
+            items,
+            item => item.Fields,
+            new SemanticSearchRequest
+            {
+                Top = options.Top,
+                IncludeAllChunkMatches = options.IncludeAllChunkMatches
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        var results = ranked.Select(result => new SemanticSearchResult<TKey>
+        {
+            Item = result.Item.Key,
+            Score = result.Score,
+            BestMatch = result.BestMatch,
+            Fields = result.Fields,
+            Scoring = result.Scoring
+        }).ToArray();
+
+        return new DatabaseSemanticSearchResult<TKey>
+        {
+            Results = results,
+            Retrieval = candidates.Retrieval
+        };
+    }
+
+    private static IReadOnlyList<SemanticField> CreateFields<TKey>(IGrouping<TKey, SemanticCandidate<TKey>> candidates)
+        where TKey : notnull
+    {
+        return candidates
+            .GroupBy(candidate => candidate.FieldName, StringComparer.Ordinal)
+            .Select(fieldGroup =>
+            {
+                var weights = fieldGroup.Select(candidate => candidate.FieldWeight).Distinct().ToArray();
+                if (weights.Length != 1)
+                    throw new ArgumentException($"Candidate field '{fieldGroup.Key}' contains conflicting field weights.", nameof(candidates));
+                return SemanticField.Create(fieldGroup.Key, fieldGroup.Select(candidate => candidate.Embedding).ToArray(), weights[0]);
+            })
+            .ToArray();
     }
 
     private SemanticSearchResult<T>? ScoreItem<T>(
@@ -235,4 +294,6 @@ internal sealed class SemanticSearchService(
         if (weight == 0) return 0;
         return 1f - MathF.Pow(1f - Math.Clamp(score, 0f, 1f), weight);
     }
+
+    private sealed record CandidateItem<TKey>(TKey Key, IReadOnlyList<SemanticField> Fields) where TKey : notnull;
 }
