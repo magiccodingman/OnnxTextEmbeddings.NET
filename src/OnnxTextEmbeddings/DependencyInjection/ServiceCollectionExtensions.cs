@@ -26,7 +26,23 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<SemanticSearchService>();
         services.AddSingleton<ISemanticSearch>(sp => sp.GetRequiredService<SemanticSearchService>());
         services.AddSingleton<ISemanticCandidateReranker>(sp => sp.GetRequiredService<SemanticSearchService>());
+        services.AddSingleton<InMemoryLexicalSearch>();
+        services.AddSingleton<ILexicalSearch>(sp => sp.GetRequiredService<InMemoryLexicalSearch>());
+        services.AddSingleton<AdvancedSearchService>();
+        services.AddSingleton<IAdvancedSearch>(sp => sp.GetRequiredService<AdvancedSearchService>());
         services.AddSingleton<IHostedService, EmbeddingWarmupHostedService>();
+        return services;
+    }
+
+    /// <summary>
+    /// Registers only the dependency-free in-memory lexical/BM25 service. This path does not register or initialize an
+    /// embedding model and is useful to applications that want lexical search without semantic retrieval.
+    /// </summary>
+    public static IServiceCollection AddOnnxTextEmbeddingsLexicalSearch(this IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        services.AddSingleton<InMemoryLexicalSearch>();
+        services.AddSingleton<ILexicalSearch>(sp => sp.GetRequiredService<InMemoryLexicalSearch>());
         return services;
     }
 }
