@@ -157,18 +157,27 @@ public sealed class PgVectorLexicalSearch
                 Array.Fill(weights, 1f);
             else
                 foreach (var mapping in mappings)
-                    weights[(int)mapping.Weight] = Math.Max(weights[(int)mapping.Weight], 1f);
+                    weights[(int)mapping.Weight] = 1f;
             return weights;
         }
 
         var map = mappings.ToDictionary(field => field.Name, field => field.Weight, StringComparer.Ordinal);
+        var maximum = selected.Count == 0 ? 1f : selected.Max(field => field.Weight);
+        if (!float.IsFinite(maximum) || maximum < 0)
+            throw new ArgumentOutOfRangeException(nameof(selected), "PostgreSQL lexical field weights must be finite and non-negative.");
+        if (maximum == 0)
+            return weights;
+
         foreach (var field in selected)
         {
             if (field.Weight < 0 || !float.IsFinite(field.Weight))
                 throw new ArgumentOutOfRangeException(nameof(selected), $"Lexical field '{field.Name}' has an invalid weight.");
             if (!map.TryGetValue(field.Name, out var label))
                 throw new ArgumentException($"No PostgreSQL text-search weight label was configured for logical field '{field.Name}'.", nameof(selected));
-            weights[(int)label] = Math.Max(weights[(int)label], field.Weight);
+
+            // PostgreSQL requires ts_rank/ts_rank_cd's D,C,B,A weight array entries to be in 0..1. SearchQuery field
+            // weights are intentionally arbitrary, so preserve their relative ratios while adapting to PostgreSQL.
+            weights[(int)label] = Math.Max(weights[(int)label], field.Weight / maximum);
         }
         return weights;
     }
