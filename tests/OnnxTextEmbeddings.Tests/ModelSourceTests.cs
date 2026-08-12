@@ -1,71 +1,49 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace OnnxTextEmbeddings.Tests;
 
 public sealed class ModelSourceTests
 {
     [Fact]
-    public async Task HuggingFaceResolverSelectsRuntimeAssetsAndResolvedSha()
+    public async Task LocalArtifactSnapshot_PreservesEmbeddingFingerprintAndModelMetadata()
     {
-        const string json = """
+        var temp = Path.Combine(Path.GetTempPath(), "onnx-text-embeddings-artifacts", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
         {
-          "sha": "abc123",
-          "siblings": [
-            { "rfilename": "model.onnx", "size": 12 },
-            { "rfilename": "tokenizer.json", "size": 34 },
-            { "rfilename": "config.json", "size": 56 },
-            { "rfilename": "README.md", "size": 78 }
-          ]
+            await File.WriteAllBytesAsync(Path.Combine(temp, "model.onnx"), [1, 2, 3, 4], TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(temp, "tokenizer.json"), "{}", TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(temp, "config.json"), "{\"max_position_embeddings\":2048}", TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(temp, "onnx-text-embeddings.json"), "{\"modelId\":\"local/test\",\"model\":{\"maxSequenceLength\":1024,\"output\":{\"normalize\":true}}}", TestContext.Current.CancellationToken);
+
+            var options = new OnnxTextEmbeddingsOptions();
+            options.Model.UseLocalDirectory(temp);
+            using var http = new HttpClient();
+            using var artifacts = new EmbeddingArtifactManager(http, options);
+
+            var candidate = await artifacts.ResolveCandidateAsync(TestContext.Current.CancellationToken);
+
+            Assert.False(candidate.RequiresPromotion);
+            Assert.Equal("local/test", candidate.Snapshot.ModelId);
+            Assert.Equal("local", candidate.Snapshot.SourceRevision);
+            Assert.Equal(1024, candidate.Snapshot.ModelMaxTokens);
+            Assert.Equal(Path.Combine(temp, "model.onnx"), candidate.Snapshot.ModelPath);
+            Assert.Equal(Path.Combine(temp, "tokenizer.json"), candidate.Snapshot.TokenizerPath);
+            Assert.Equal(await ComputeLegacyFingerprintAsync(temp), candidate.Snapshot.EmbeddingSpaceFingerprint);
         }
-        """;
-        using var http = new HttpClient(new StaticHandler(_ => Json(json)));
-        var options = new OnnxTextEmbeddingsOptions();
-        options.Model.UseHuggingFace("owner/model");
-        var source = new HuggingFaceModelSource(http, options, NullLogger<HuggingFaceModelSource>.Instance);
-
-        var resolved = await source.ResolveAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal("owner/model", resolved.ModelId);
-        Assert.Equal("abc123", resolved.Revision);
-        Assert.Equal(3, resolved.Assets.Count);
-        Assert.DoesNotContain(resolved.Assets, asset => asset.Path == "README.md");
-        Assert.All(resolved.Assets, asset => Assert.Contains("/resolve/abc123/", asset.Uri.AbsoluteUri, StringComparison.Ordinal));
+        finally
+        {
+            if (Directory.Exists(temp))
+                Directory.Delete(temp, recursive: true);
+        }
     }
 
     [Fact]
-    public async Task HttpManifestSupportsRelativeAssetsHashesAndSizes()
+    public async Task ModelArtifactsPathTraversal_IsTranslatedToExistingPublicDownloadException()
     {
-        const string json = """
-        {
-          "modelId": "custom/embed",
-          "revision": "v7",
-          "assets": [
-            { "path": "model.onnx", "url": "files/model.onnx", "size": 123, "sha256": "abcd" },
-            "tokenizer.json"
-          ]
-        }
-        """;
-        using var http = new HttpClient(new StaticHandler(_ => Json(json)));
-        var options = new OnnxTextEmbeddingsOptions();
-        options.Model.UseHttpManifest(new Uri("https://models.example/embed/manifest.json"));
-        var source = new HttpManifestModelSource(http, options);
-
-        var resolved = await source.ResolveAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal("custom/embed", resolved.ModelId);
-        Assert.Equal("v7", resolved.Revision);
-        Assert.Equal(new Uri("https://models.example/embed/files/model.onnx"), resolved.Assets[0].Uri);
-        Assert.Equal(123, resolved.Assets[0].Size);
-        Assert.Equal("abcd", resolved.Assets[0].Sha256);
-        Assert.Equal(new Uri("https://models.example/embed/tokenizer.json"), resolved.Assets[1].Uri);
-    }
-
-    [Fact]
-    public async Task CacheRejectsManifestPathTraversalBeforeActivation()
-    {
-        var temp = Path.Combine(Path.GetTempPath(), "onnx-text-embeddings-tests", Guid.NewGuid().ToString("N"));
+        var temp = Path.Combine(Path.GetTempPath(), "onnx-text-embeddings-artifacts", Guid.NewGuid().ToString("N"));
         try
         {
             const string manifest = """
@@ -82,12 +60,10 @@ public sealed class ModelSourceTests
             var options = new OnnxTextEmbeddingsOptions();
             options.Cache.Directory = temp;
             options.Model.UseHttpManifest(new Uri("https://models.example/manifest.json"));
-            var hf = new HuggingFaceModelSource(http, options, NullLogger<HuggingFaceModelSource>.Instance);
-            var manifestSource = new HttpManifestModelSource(http, options);
-            var cache = new ModelCacheManager(http, options, hf, manifestSource, NullLogger<ModelCacheManager>.Instance);
+            using var artifacts = new EmbeddingArtifactManager(http, options);
 
             await Assert.ThrowsAsync<ModelDownloadException>(async () =>
-                await cache.ResolveCandidateAsync(TestContext.Current.CancellationToken));
+                await artifacts.ResolveCandidateAsync(TestContext.Current.CancellationToken));
 
             Assert.False(File.Exists(Path.Combine(temp, "escape.onnx")));
         }
@@ -96,6 +72,25 @@ public sealed class ModelSourceTests
             if (Directory.Exists(temp))
                 Directory.Delete(temp, recursive: true);
         }
+    }
+
+    private static async Task<string> ComputeLegacyFingerprintAsync(string directory)
+    {
+        using var aggregate = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var files = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Where(path => new[] { ".onnx", ".json", ".txt", ".model", ".data", ".onnx_data" }
+                .Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
+            .OrderBy(path => Path.GetRelativePath(directory, path), StringComparer.Ordinal)
+            .ToArray();
+        foreach (var file in files)
+        {
+            var relative = Path.GetRelativePath(directory, file).Replace('\\', '/');
+            aggregate.AppendData(Encoding.UTF8.GetBytes(relative));
+            aggregate.AppendData([0]);
+            await using var stream = File.OpenRead(file);
+            aggregate.AppendData(await SHA256.HashDataAsync(stream, TestContext.Current.CancellationToken));
+        }
+        return Convert.ToHexString(aggregate.GetHashAndReset()).ToLowerInvariant();
     }
 
     private static HttpResponseMessage Json(string json) => new(HttpStatusCode.OK)

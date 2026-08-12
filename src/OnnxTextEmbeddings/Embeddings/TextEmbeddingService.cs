@@ -1,4 +1,7 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.ML.OnnxRuntime;
+using OnnxModelRuntime;
+using EmbeddingRuntime = OnnxModelRuntime.OnnxModelRuntime<OnnxTextEmbeddings.TokenizedModelInput, float[]>;
 
 namespace OnnxTextEmbeddings;
 
@@ -63,10 +66,6 @@ public interface ITextEmbeddingService : IAsyncDisposable
         return count with { QueryMaxTokens = requestOptions.MaxTokens.Value };
     }
 
-    /// <summary>
-    /// Embeds text using the requested return format for this call. Implementations may override this to encode
-    /// directly from their native inference output. The default implementation converts the normal returned record.
-    /// </summary>
     async Task<IReadOnlyList<TextEmbedding>> EmbedAsync(
         string text,
         EmbeddingVectorFormat format,
@@ -76,7 +75,6 @@ public interface ITextEmbeddingService : IAsyncDisposable
         return embeddings.Select(item => item with { Vector = item.Vector.ConvertTo(format) }).ToArray();
     }
 
-    /// <summary>Embeds a document using the requested return format for this call.</summary>
     async Task<IReadOnlyList<TextEmbedding>> EmbedDocumentAsync(
         string text,
         EmbeddingVectorFormat format,
@@ -86,7 +84,6 @@ public interface ITextEmbeddingService : IAsyncDisposable
         return embeddings.Select(item => item with { Vector = item.Vector.ConvertTo(format) }).ToArray();
     }
 
-    /// <summary>Embeds a single query vector using the requested return format for this call.</summary>
     async Task<QueryEmbedding> EmbedQueryAsync(
         string query,
         EmbeddingVectorFormat format,
@@ -138,7 +135,7 @@ public interface ITextEmbeddingService : IAsyncDisposable
 
 internal sealed class TextEmbeddingService(
     OnnxTextEmbeddingsOptions options,
-    ModelCacheManager modelCache,
+    EmbeddingArtifactManager modelArtifacts,
     ILogger<TextEmbeddingService> logger) : ITextEmbeddingService
 {
     private readonly SemaphoreSlim _initializationLock = new(1, 1);
@@ -146,7 +143,7 @@ internal sealed class TextEmbeddingService(
     private ModelSnapshot? _snapshot;
     private HuggingFaceEmbeddingTokenizer? _tokenizer;
     private StructuredTextChunker? _chunker;
-    private InferenceWorkerPool? _workers;
+    private EmbeddingRuntime? _runtime;
     private ModelRuntimeInfo? _modelInfo;
     private bool _disposed;
 
@@ -157,16 +154,17 @@ internal sealed class TextEmbeddingService(
         get
         {
             var info = _modelInfo;
-            var workers = _workers;
-            if (info is null || workers is null)
+            var runtime = _runtime;
+            if (info is null || runtime is null)
                 return info;
-            var instances = workers.GetRuntimeInfo();
+
+            var runtimeInfo = runtime.GetRuntimeInfo();
             return info with
             {
-                HealthyModelInstanceCount = instances.Count(instance => instance.Health == ModelInstanceHealth.Healthy),
-                RecoveringModelInstanceCount = instances.Count(instance => instance.Health is ModelInstanceHealth.Draining or ModelInstanceHealth.Recovering or ModelInstanceHealth.Faulted),
-                ActiveRequests = instances.Sum(instance => instance.ActiveRequests),
-                Instances = instances
+                HealthyModelInstanceCount = runtimeInfo.HealthyModelInstanceCount,
+                RecoveringModelInstanceCount = runtimeInfo.RecoveringModelInstanceCount,
+                ActiveRequests = runtimeInfo.ActiveRequests,
+                Instances = runtimeInfo.Instances.Select(MapInstance).ToArray()
             };
         }
     }
@@ -191,17 +189,20 @@ internal sealed class TextEmbeddingService(
         await _initializationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         ModelCandidate? candidate = null;
         HuggingFaceEmbeddingTokenizer? candidateTokenizer = null;
-        InferenceWorkerPool? candidateWorkers = null;
+        EmbeddingRuntime? candidateRuntime = null;
         try
         {
             if (!forceRemoteCheck && _status.State == EmbeddingServiceState.Ready)
                 return false;
 
-            var hadWorkingRuntime = _workers is not null && _tokenizer is not null && _snapshot is not null;
+            var hadWorkingRuntime = _runtime is not null && _tokenizer is not null && _snapshot is not null;
             _status = new EmbeddingServiceStatus(EmbeddingServiceState.ResolvingModel);
             try
             {
-                candidate = await modelCache.ResolveCandidateAsync(cancellationToken, forceRemoteCheck).ConfigureAwait(false);
+                candidate = await modelArtifacts.ResolveCandidateAsync(cancellationToken, forceRemoteCheck).ConfigureAwait(false);
+                if (candidate.IsOfflineFallback)
+                    logger.LogWarning("Unable to resolve the configured remote model. Continuing with the known-good cached artifact snapshot.");
+
                 if (hadWorkingRuntime && !candidate.RequiresPromotion &&
                     _snapshot!.EmbeddingSpaceFingerprint.Equals(candidate.Snapshot.EmbeddingSpaceFingerprint, StringComparison.Ordinal) &&
                     _snapshot.SourceRevision.Equals(candidate.Snapshot.SourceRevision, StringComparison.Ordinal))
@@ -214,77 +215,83 @@ internal sealed class TextEmbeddingService(
                 _status = new EmbeddingServiceStatus(EmbeddingServiceState.Loading);
 
                 candidateTokenizer = new HuggingFaceEmbeddingTokenizer(candidate.Snapshot.TokenizerPath);
-                candidateWorkers = new InferenceWorkerPool(
+                var candidateExecutor = new EmbeddingOnnxExecutor();
+                candidateRuntime = new EmbeddingRuntime(
                     candidate.Snapshot.ModelPath,
-                    options.Inference,
-                    options.Model.JasperPrecision,
-                    logger);
+                    candidateExecutor,
+                    options.Inference.ToRuntimeOptions());
                 var candidateChunker = new StructuredTextChunker(candidateTokenizer, options);
 
-                await modelCache.PromoteAsync(candidate, cancellationToken).ConfigureAwait(false);
+                // ModelArtifacts.NET intentionally leaves application validation to us. Exercise the actual tokenizer,
+                // ONNX tensor contract, runtime scheduler and pooling path before the candidate is made current.
+                _status = new EmbeddingServiceStatus(EmbeddingServiceState.Validating);
+                var validationInput = candidateTokenizer.EncodeModelInput("validation");
+                _ = await RunInferenceAsync(candidateRuntime, validationInput, cancellationToken).ConfigureAwait(false);
 
-                var previousWorkers = _workers;
+                await modelArtifacts.PromoteAsync(candidate, cancellationToken).ConfigureAwait(false);
+
+                var previousRuntime = _runtime;
                 var previousTokenizer = _tokenizer;
                 _snapshot = candidate.Snapshot;
                 _tokenizer = candidateTokenizer;
                 _chunker = candidateChunker;
-                _workers = candidateWorkers;
+                _runtime = candidateRuntime;
                 candidateTokenizer = null;
-                candidateWorkers = null;
+                candidateRuntime = null;
 
                 _modelInfo = new ModelRuntimeInfo(
                     candidate.Snapshot.ModelId,
                     candidate.Snapshot.SourceRevision,
                     candidate.Snapshot.EmbeddingSpaceFingerprint,
                     candidate.Snapshot.ModelMaxTokens,
-                    _workers.EmbeddingDimensions,
-                    _workers.ModelInstanceCount)
+                    candidateExecutor.EmbeddingDimensions,
+                    _runtime.ModelInstanceCount)
                 {
-                    ThreadsPerModel = _workers.ThreadsPerModel,
-                    ConcurrentRequestsPerModel = _workers.ConcurrentRequestsPerModel
+                    ThreadsPerModel = _runtime.ThreadsPerModel,
+                    ConcurrentRequestsPerModel = _runtime.ConcurrentRequestsPerModel
                 };
                 _status = new EmbeddingServiceStatus(EmbeddingServiceState.Ready);
 
-                if (previousWorkers is not null)
+                if (previousRuntime is not null)
                 {
-                    try { await previousWorkers.DisposeAsync().ConfigureAwait(false); }
+                    try { await previousRuntime.DisposeAsync().ConfigureAwait(false); }
                     catch (Exception ex) { logger.LogWarning(ex, "Unable to cleanly dispose the previous ONNX runtime after a model swap."); }
                 }
                 previousTokenizer?.Dispose();
 
                 try
                 {
-                    await modelCache.CleanupOldSnapshotsAsync(candidate, cancellationToken).ConfigureAwait(false);
+                    await modelArtifacts.CleanupAsync(cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogWarning(ex, "The new model is active, but an older cached snapshot could not be deleted. It will be retried on a future cleanup.");
+                    logger.LogWarning(ex, "The new model is active, but an older cached artifact snapshot could not be deleted. It will be retried on a future cleanup.");
                 }
 
                 logger.LogInformation(
                     "ONNX text embedding service is ready with model {ModelId} ({Revision}), {ModelInstances} model instance(s), {ThreadsPerModel} threads/model, and {ConcurrentRequestsPerModel} concurrent requests/model.",
                     candidate.Snapshot.ModelId,
                     candidate.Snapshot.SourceRevision,
-                    _workers.ModelInstanceCount,
-                    _workers.ThreadsPerModel,
-                    _workers.ConcurrentRequestsPerModel);
+                    _runtime.ModelInstanceCount,
+                    _runtime.ThreadsPerModel,
+                    _runtime.ConcurrentRequestsPerModel);
                 return candidate.RequiresPromotion || !hadWorkingRuntime;
             }
             catch (Exception ex)
             {
-                if (candidateWorkers is not null)
+                if (candidateRuntime is not null)
                 {
-                    try { await candidateWorkers.DisposeAsync().ConfigureAwait(false); }
+                    try { await candidateRuntime.DisposeAsync().ConfigureAwait(false); }
                     catch (Exception disposeError) { logger.LogDebug(disposeError, "Unable to dispose a failed candidate ONNX runtime."); }
-                    candidateWorkers = null;
+                    candidateRuntime = null;
                 }
                 candidateTokenizer?.Dispose();
                 candidateTokenizer = null;
 
                 if (candidate is { RequiresPromotion: true })
                 {
-                    try { await modelCache.DiscardAsync(candidate, CancellationToken.None).ConfigureAwait(false); }
-                    catch (Exception cleanupError) { logger.LogWarning(cleanupError, "Unable to remove a failed model candidate snapshot."); }
+                    try { await modelArtifacts.DiscardAsync(candidate, CancellationToken.None).ConfigureAwait(false); }
+                    catch (Exception cleanupError) { logger.LogWarning(cleanupError, "Unable to remove a failed model candidate artifact snapshot."); }
                 }
 
                 if (hadWorkingRuntime)
@@ -370,7 +377,7 @@ internal sealed class TextEmbeddingService(
         var format = requestOptions.VectorFormat ?? options.Vectors.DocumentFormat;
         var snapshot = _snapshot!;
         var chunks = _chunker!.Chunk(text, maxTokens);
-        var tasks = chunks.Select(chunk => _workers!.RunAsync(chunk.ModelInput, cancellationToken)).ToArray();
+        var tasks = chunks.Select(chunk => RunInferenceAsync(_runtime!, chunk.ModelInput, cancellationToken)).ToArray();
         var vectors = await Task.WhenAll(tasks).ConfigureAwait(false);
         var identity = CreateIdentity(snapshot);
         var result = new TextEmbedding[chunks.Count];
@@ -432,7 +439,7 @@ internal sealed class TextEmbeddingService(
         if (!count.Fits)
             throw new QueryTokenLimitExceededException(count.SourceTokenCount, count.InputTokenCount, count.QueryMaxTokens, count.ModelMaxTokens);
 
-        var values = await _workers!.RunAsync(input, cancellationToken).ConfigureAwait(false);
+        var values = await RunInferenceAsync(_runtime!, input, cancellationToken).ConfigureAwait(false);
         return new QueryEmbedding
         {
             Vector = EmbeddingVector.FromFloat32(values, requestOptions.VectorFormat ?? options.Vectors.QueryFormat),
@@ -440,6 +447,25 @@ internal sealed class TextEmbeddingService(
             SourceTokenCount = count.SourceTokenCount,
             InputTokenCount = count.InputTokenCount
         };
+    }
+
+    private static async Task<float[]> RunInferenceAsync(
+        EmbeddingRuntime runtime,
+        TokenizedModelInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await runtime.RunAsync(input, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OnnxModelExecutionException ex)
+        {
+            throw new InferenceException(ex.Message, ex);
+        }
+        catch (OnnxRuntimeException ex)
+        {
+            throw new InferenceException("ONNX embedding inference failed.", ex);
+        }
     }
 
     private int ResolveDocumentMaxTokens(EmbeddingRequestOptions requestOptions)
@@ -484,6 +510,16 @@ internal sealed class TextEmbeddingService(
             throw new ModelValidationException($"QueryMaxTokens ({options.QueryMaxTokens}) exceeds model maximum ({max}).");
     }
 
+    private static ModelInstanceRuntimeInfo MapInstance(global::OnnxModelRuntime.ModelInstanceRuntimeInfo instance) => new(
+        instance.Index,
+        (ModelInstanceHealth)(int)instance.Health,
+        instance.ActiveRequests,
+        instance.MaxConcurrentRequests,
+        instance.Generation,
+        instance.TotalRecoveries,
+        instance.RecoveryAttempts,
+        instance.LastFailure);
+
     private void ThrowIfDisposed()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(TextEmbeddingService));
@@ -494,8 +530,8 @@ internal sealed class TextEmbeddingService(
         if (_disposed) return;
         _disposed = true;
         _status = new EmbeddingServiceStatus(EmbeddingServiceState.Disposed);
-        if (_workers is not null)
-            await _workers.DisposeAsync().ConfigureAwait(false);
+        if (_runtime is not null)
+            await _runtime.DisposeAsync().ConfigureAwait(false);
         _tokenizer?.Dispose();
         _initializationLock.Dispose();
     }

@@ -1,6 +1,8 @@
 # Concurrency, load balancing, and recovery
 
-ONNX Runtime can execute multiple inference calls concurrently against the same `InferenceSession`. OnnxTextEmbeddings.NET uses that capability so ordinary request concurrency does not require another copy of the model in memory.
+OnnxTextEmbeddings.NET keeps its public embedding-oriented inference options and diagnostics, but the generic session-hosting machinery is now supplied by the reusable `OnnxModelRuntime.NET` NuGet package.
+
+The embedding package maps its existing options directly into `OnnxModelRuntimeOptions`, so this extraction is an ownership refactor rather than a new concurrency model.
 
 ## Three separate controls
 
@@ -12,11 +14,33 @@ options.Inference.ConcurrentRequestsPerModel = 0; // automatic
 
 - `ModelInstanceCount` — independent ONNX sessions/model copies in memory.
 - `ThreadsPerModel` — ONNX Runtime intra-op thread count for each session.
-- `ConcurrentRequestsPerModel` — simultaneous `Run()` calls allowed against each session.
+- `ConcurrentRequestsPerModel` — simultaneous inference calls allowed against each session.
+
+## What OnnxTextEmbeddings still owns
+
+The local `EmbeddingOnnxExecutor` owns the model-specific tensor contract, output-shape validation, mean pooling when required, normalization, and embedding dimension observation.
+
+It does **not** own queueing, scheduling, session lifecycle, or recovery.
+
+## What OnnxModelRuntime owns
+
+`OnnxModelRuntime.NET` owns:
+
+```text
+InferenceSession creation/disposal
+bounded global queue + backpressure
+per-instance request limits
+least-loaded scheduling + fair tie rotation
+health/draining/recovery/generation tracking
+recoverable-failure retry policy
+memory-pressure isolation
+runtime diagnostics
+async shutdown
+```
 
 ## Automatic concurrency
 
-Automatic mode resolves to approximately half the configured model thread count, minimum one, capped at eight:
+Automatic mode remains:
 
 ```text
 max(1, min(ThreadsPerModel / 2, 8))
@@ -33,11 +57,11 @@ max(1, min(ThreadsPerModel / 2, 8))
 | 24 | 8 |
 | 32 | 8 |
 
-The cap is a package default, not an ONNX Runtime hard limit. Explicit positive values remain honored.
+The cap is a package policy rather than an ONNX Runtime limitation. Explicit positive values are honored.
+
+When `ThreadsPerModel = 0`, the shared runtime also resolves the hardware-based thread count using `MaximumAutoThreadsPerModel` and configured model-instance count.
 
 ## Least-loaded routing
-
-When several model instances are in memory, the package does not fill one model and then move to the next. A single scheduler tracks `ActiveRequests` for every healthy instance and reserves the healthy instance with the lowest active count.
 
 ```text
 global bounded queue
@@ -49,82 +73,49 @@ B 2/8  ← next request
 C recovering (not eligible)
 ```
 
-Ties use a rotating cursor. Two idle instances receiving two requests therefore receive one request each.
+A single scheduler owns reservations; native execution runs independently after reservation. Equal loads use a rotating tie cursor.
 
-## Why multiple model instances are not the default performance strategy
+## Why multiple copies are not the default performance strategy
 
-Loading another model copy usually costs a lot of RAM and **usually does not produce another proportional throughput gain**. On typical CPU systems, once one session is sufficiently busy, the limiting resource tends to be shared hardware such as memory bandwidth, caches, memory controllers/interconnects, or broader motherboard/platform throughput. The exact limiter varies by CPU and system, but it is often not "we need another model in RAM."
+Loading another model copy costs RAM and usually does not create a proportional throughput gain on an already-busy CPU. Shared memory bandwidth/cache/interconnect/platform throughput frequently becomes limiting before model-instance count does.
 
-`ModelInstanceCount > 1` therefore exists primarily for:
+`ModelInstanceCount > 1` therefore remains useful for experiments, unusual CPU/NUMA topologies, redundancy/recovery behavior, and systems where benchmarks prove another copy helps.
 
-- experimentation and benchmarking;
-- unusual CPU/memory/NUMA topologies;
-- future architecture-specific scheduling/affinity work;
-- machines where measurements actually show a second session helps.
+## Failure lifecycle
 
-A possible experimental optimization is to isolate model instances by CPU topology—such as NUMA nodes, CPU groups, or AMD CCD-related layouts—and preserve memory locality so sessions contend less for shared bandwidth/cache. That needs per-platform benchmarking and is not assumed to improve every machine.
-
-## Slot accounting
-
-A request slot is reserved before inference and released in a `finally` path. Cancellation and failures therefore cannot permanently consume one of the instance's concurrency slots.
-
-The public `ModelInfo.Instances` diagnostics expose each instance's current active/max request count.
-
-## Instance health lifecycle
-
-Each session/model copy has an explicit lifecycle:
+A recoverable model-instance failure removes only that instance from scheduling:
 
 ```text
 Healthy
-   ↓ runtime/session failure
+  ↓ recoverable runtime/session failure
 Draining
-   ↓ active requests reach zero
+  ↓ active calls complete
 Recovering
-   ↓ old session disposed
-create fresh InferenceSession
-   ↓ success
-Healthy (new generation)
+  ↓ old instance disposed / fresh instance created
+Healthy (generation + 1)
 ```
 
-If replacement creation fails, the instance stays out of rotation and retries with bounded exponential backoff. It is never marked healthy merely because time passed.
+Failed recreations remain unavailable and retry with bounded backoff. Other healthy instances keep serving. With no healthy instance, the bounded queue waits for recovery instead of inventing capacity.
 
-`Generation` increases only after a fresh session is successfully created. `TotalRecoveries`, `RecoveryAttempts`, and `LastFailure` are exposed for diagnostics.
+A normal recoverable runtime failure can retry the affected request at most once. Memory-pressure failures rebuild/quarantine the affected instance but do not immediately send the same request to another loaded copy, reducing cascading OOM risk.
 
-## Traffic during recovery
+Model-specific validation/application exceptions are not classified as infrastructure failures and therefore do not cause expensive session reconstruction.
 
-With multiple instances, new work routes only to healthy copies. With one instance, the global queue waits for the replacement session to become healthy, then resumes. The queue remains bounded; once it is full, producers asynchronously wait instead of creating unbounded memory growth.
+## Public diagnostics compatibility
 
-## Request retry policy
-
-A recoverable ONNX session/runtime failure may transparently retry the affected request **once** through the global scheduler. Because the bad instance is already out of rotation, the retry goes to another healthy instance when one exists or waits for recovery when it was the only instance.
-
-Memory-pressure failures are different. They quarantine and rebuild the affected instance, but the failed request is not immediately retried on another model copy. This avoids turning one allocation failure into a cascading OOM across every loaded session.
-
-## OOM boundary
-
-The package can recover from failures that leave the .NET process alive. It cannot self-heal after the operating system, container runtime, or cgroup kills the entire process. Configure systemd, Kubernetes, your service manager, or another process supervisor for process-level restart.
-
-## Runtime diagnostics
+`ITextEmbeddingService.ModelInfo` still exposes the embedding package's existing `ModelRuntimeInfo` / `ModelInstanceRuntimeInfo` records. They are projections of the generic runtime diagnostics so consumers are not forced to reference OnnxModelRuntime.NET types in their application API.
 
 ```csharp
 var runtime = embeddingService.ModelInfo;
-
 Console.WriteLine(runtime?.HealthyModelInstanceCount);
 Console.WriteLine(runtime?.RecoveringModelInstanceCount);
 Console.WriteLine(runtime?.ActiveRequests);
-
-foreach (var instance in runtime?.Instances ?? [])
-{
-    Console.WriteLine($"{instance.Index}: {instance.Health} " +
-                      $"{instance.ActiveRequests}/{instance.MaxConcurrentRequests} " +
-                      $"generation {instance.Generation}");
-}
 ```
 
-## `ORT_SEQUENTIAL` is retained
+## OOM/process boundary
 
-The session uses ONNX Runtime's sequential graph execution mode plus the configured intra-op thread count. That graph scheduling choice does not prohibit concurrent callers from invoking `Run()` against the same session.
+The runtime can recover only while the .NET process remains alive. An OS/container/cgroup process kill still requires systemd, Kubernetes, or another process supervisor to restart the application.
 
-## Compatibility names
+## Compatibility aliases
 
-The early `WorkerCount`, `ThreadsPerWorker`, and `MaximumAutoThreadsPerWorker` properties remain obsolete aliases for source compatibility. New code should use the model-oriented names.
+The early `WorkerCount`, `ThreadsPerWorker`, and `MaximumAutoThreadsPerWorker` properties remain obsolete aliases. New code should use the model-oriented names.

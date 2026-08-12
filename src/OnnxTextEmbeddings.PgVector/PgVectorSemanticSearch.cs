@@ -27,6 +27,10 @@ public sealed record PgVectorCandidateQuery
     public required string RecordJsonColumn { get; init; }
     public string? FieldWeightColumn { get; init; }
     public string? AdditionalWhereSql { get; init; }
+    public SearchFilter? Filter { get; init; }
+    public IReadOnlyDictionary<string, string> FilterColumns { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
+    public IReadOnlyList<string>? IncludeFields { get; init; }
+    public IReadOnlyDictionary<string, float>? QueryFieldWeights { get; init; }
     public PgVectorStorageKind StorageKind { get; init; } = PgVectorStorageKind.Vector;
     public PgVectorSearchMode SearchMode { get; init; } = PgVectorSearchMode.Exact;
 }
@@ -77,19 +81,31 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
         options ??= new DatabaseSemanticSearchOptions();
         var candidateCount = options.ResolveCandidateCount();
 
-        var itemKey = QuoteIdentifier(candidateQuery.ItemKeyColumn);
-        var fieldName = QuoteIdentifier(candidateQuery.FieldNameColumn);
-        var recordJson = QuoteIdentifier(candidateQuery.RecordJsonColumn);
-        var fingerprint = QuoteIdentifier(candidateQuery.FingerprintColumn);
-        var vectorColumn = QuoteIdentifier(candidateQuery.VectorColumn);
+        var itemKey = $"t.{QuoteIdentifier(candidateQuery.ItemKeyColumn)}";
+        var fieldName = $"t.{QuoteIdentifier(candidateQuery.FieldNameColumn)}";
+        var recordJson = $"t.{QuoteIdentifier(candidateQuery.RecordJsonColumn)}";
+        var fingerprint = $"t.{QuoteIdentifier(candidateQuery.FingerprintColumn)}";
+        var vectorColumn = $"t.{QuoteIdentifier(candidateQuery.VectorColumn)}";
         var table = QuoteIdentifierPath(candidateQuery.Table);
         var distance = $"{vectorColumn} <=> @ote_query";
         var weight = candidateQuery.FieldWeightColumn is null
             ? "CAST(1.0 AS real)"
-            : QuoteIdentifier(candidateQuery.FieldWeightColumn);
-        var extraWhere = string.IsNullOrWhiteSpace(candidateQuery.AdditionalWhereSql)
-            ? string.Empty
-            : $" AND ({candidateQuery.AdditionalWhereSql})";
+            : $"t.{QuoteIdentifier(candidateQuery.FieldWeightColumn)}";
+
+        var portableFilter = SearchFilterSqlCompiler.Compile(
+            candidateQuery.Filter,
+            logical => $"t.{QuoteIdentifier(ResolveFilterColumn(candidateQuery.FilterColumns, logical))}");
+        var where = new List<string> { $"{fingerprint} = @ote_fingerprint" };
+        if (!string.IsNullOrWhiteSpace(portableFilter.Sql)) where.Add(portableFilter.Sql);
+        if (!string.IsNullOrWhiteSpace(candidateQuery.AdditionalWhereSql)) where.Add($"({candidateQuery.AdditionalWhereSql})");
+        if (candidateQuery.IncludeFields is { } fields)
+        {
+            if (fields.Count == 0)
+                where.Add("1 = 0");
+            else
+                where.Add($"{fieldName} IN ({string.Join(", ", fields.Select((_, index) => $"@ote_field_{index}"))})");
+        }
+        var whereSql = string.Join(" AND ", where);
 
         var sql = candidateQuery.SearchMode == PgVectorSearchMode.Exact
             ? $"""
@@ -99,8 +115,8 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
                            {recordJson} AS ote_record_json,
                            {weight} AS ote_field_weight,
                            ({distance}) AS ote_distance
-                    FROM {table}
-                    WHERE {fingerprint} = @ote_fingerprint{extraWhere}
+                    FROM {table} AS t
+                    WHERE {whereSql}
                 )
                 SELECT ote_item_key,
                        ote_field_name,
@@ -117,8 +133,8 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
                        {recordJson},
                        {weight},
                        1.0 - ({distance}) AS native_similarity
-                FROM {table}
-                WHERE {fingerprint} = @ote_fingerprint{extraWhere}
+                FROM {table} AS t
+                WHERE {whereSql}
                 ORDER BY {distance}
                 LIMIT @ote_candidate_count
                 """;
@@ -131,6 +147,13 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
             candidateQuery.StorageKind == PgVectorStorageKind.HalfVector
                 ? query.Vector.ToPgHalfVector()
                 : query.Vector.ToPgVector());
+        foreach (var parameter in portableFilter.Parameters)
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value ?? DBNull.Value);
+        if (candidateQuery.IncludeFields is { } included)
+        {
+            for (var index = 0; index < included.Count; index++)
+                command.Parameters.AddWithValue($"ote_field_{index}", included[index]);
+        }
         configureFilterParameters?.Invoke(command);
 
         var results = new List<SemanticCandidate<TKey>>(candidateCount);
@@ -138,12 +161,16 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
         {
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
+                var name = reader.GetString(1);
+                var fieldWeight = Convert.ToSingle(reader.GetValue(3), CultureInfo.InvariantCulture);
+                if (candidateQuery.QueryFieldWeights is { } queryWeights && queryWeights.TryGetValue(name, out var queryWeight))
+                    fieldWeight *= queryWeight;
                 results.Add(new SemanticCandidate<TKey>
                 {
                     ItemKey = ReadKey<TKey>(reader.GetValue(0)),
-                    FieldName = reader.GetString(1),
+                    FieldName = name,
                     Embedding = EmbeddingSerializer.DeserializeJson(reader.GetString(2)),
-                    FieldWeight = Convert.ToSingle(reader.GetValue(3), CultureInfo.InvariantCulture),
+                    FieldWeight = fieldWeight,
                     NativeSimilarity = Convert.ToSingle(reader.GetValue(4), CultureInfo.InvariantCulture)
                 });
             }
@@ -163,13 +190,20 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
         };
     }
 
-    private static string QuoteIdentifier(string identifier)
+    private static string ResolveFilterColumn(IReadOnlyDictionary<string, string> columns, string logical)
+    {
+        if (!columns.TryGetValue(logical, out var physical) || string.IsNullOrWhiteSpace(physical))
+            throw new ArgumentException($"No PostgreSQL filter-column mapping was configured for logical field '{logical}'.");
+        return physical;
+    }
+
+    internal static string QuoteIdentifier(string identifier)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(identifier);
         return $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
     }
 
-    private static string QuoteIdentifierPath(string path)
+    internal static string QuoteIdentifierPath(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var parts = path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -178,7 +212,7 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
         return string.Join('.', parts.Select(QuoteIdentifier));
     }
 
-    private static TKey ReadKey<TKey>(object value) where TKey : notnull
+    internal static TKey ReadKey<TKey>(object value) where TKey : notnull
     {
         if (value is TKey typed)
             return typed;
@@ -194,6 +228,8 @@ public static class PgVectorServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
         services.AddSingleton<PgVectorSemanticSearch>();
+        services.AddSingleton<PgVectorLexicalSearch>();
+        services.AddSingleton<PgVectorAdvancedSearch>();
         return services;
     }
 }

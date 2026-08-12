@@ -14,6 +14,8 @@
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="ModelArtifacts.NET" />
+    <PackageReference Include="OnnxModelRuntime.NET" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" />
     <PackageReference Include="Tokenizers.HuggingFace" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
