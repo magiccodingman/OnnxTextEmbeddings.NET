@@ -68,7 +68,11 @@ public static class SqliteVecConnectionExtensions
     }
 }
 
-/// <summary>Native sqlite-vec KNN candidate retrieval followed by the shared core semantic reranker.</summary>
+/// <summary>
+/// sqlite-vec semantic candidate retrieval followed by the shared core reranker. Filter shapes that vec0 can safely
+/// push into its KNN metadata planner use MATCH/KNN directly; richer portable filters fall back to an exact filtered
+/// scalar cosine scan so filter semantics are preserved instead of being weakened to fit vec0's restricted grammar.
+/// </summary>
 public sealed class SqliteVecSemanticSearch(ISemanticCandidateReranker reranker)
 {
     public async Task<DatabaseSemanticSearchResult<TKey>> SearchAsync<TKey>(
@@ -123,32 +127,90 @@ public sealed class SqliteVecSemanticSearch(ISemanticCandidateReranker reranker)
         var portableFilter = SearchFilterSqlCompiler.Compile(
             candidateQuery.Filter,
             logical => QuoteIdentifier(ResolveFilterColumn(candidateQuery.FilterColumns, logical)));
-        var where = new List<string>
-        {
-            $"{vectorColumn} MATCH {vectorConstructor}($ote_query)",
-            "k = $ote_candidate_count",
-            $"{fingerprint} = $ote_fingerprint"
-        };
-        if (!string.IsNullOrWhiteSpace(portableFilter.Sql)) where.Add(portableFilter.Sql);
-        if (!string.IsNullOrWhiteSpace(candidateQuery.AdditionalWhereSql)) where.Add($"({candidateQuery.AdditionalWhereSql})");
-        if (candidateQuery.IncludeFields is { } fields)
-        {
-            if (fields.Count == 0)
-                where.Add("1 = 0");
-            else
-                where.Add($"{fieldName} IN ({string.Join(", ", fields.Select((_, index) => $"$ote_field_{index}"))})");
-        }
 
-        var sql = $"""
-            SELECT {itemKey},
-                   {fieldName},
-                   {recordJson},
-                   {weight},
-                   1.0 - distance AS native_similarity
-            FROM {table}
-            WHERE {string.Join(" AND ", where)}
-            ORDER BY distance
-            """;
+        var reservedKnnColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            candidateQuery.FingerprintColumn
+        };
+        if (candidateQuery.IncludeFields is { Count: 1 })
+            reservedKnnColumns.Add(candidateQuery.FieldNameColumn);
+
+        var knnFilterSupported = TryCompileKnnFilter(
+            candidateQuery.Filter,
+            candidateQuery.FilterColumns,
+            reservedKnnColumns,
+            out var knnFilter);
+        var useKnn = knnFilterSupported
+            && string.IsNullOrWhiteSpace(candidateQuery.AdditionalWhereSql)
+            && candidateQuery.IncludeFields is null or { Count: <= 1 };
+
+        string sql;
+        string retrievalMode;
+        CompiledSearchFilter filterToBind;
+        if (useKnn)
+        {
+            var where = new List<string>
+            {
+                $"{vectorColumn} MATCH {vectorConstructor}($ote_query)",
+                "k = $ote_candidate_count",
+                $"{fingerprint} = $ote_fingerprint"
+            };
+            if (!string.IsNullOrWhiteSpace(knnFilter.Sql))
+                where.Add(knnFilter.Sql);
+            if (candidateQuery.IncludeFields is { Count: 1 } oneField)
+                where.Add($"{fieldName} = $ote_field_0");
+
+            sql = $"""
+                SELECT {itemKey},
+                       {fieldName},
+                       {recordJson},
+                       {weight},
+                       1.0 - distance AS native_similarity
+                FROM {table}
+                WHERE {string.Join(" AND ", where)}
+                ORDER BY distance
+                """;
+            retrievalMode = $"{candidateQuery.StorageKind}/KNN";
+            filterToBind = knnFilter;
+        }
+        else
+        {
+            var where = new List<string> { $"{fingerprint} = $ote_fingerprint" };
+            if (!string.IsNullOrWhiteSpace(portableFilter.Sql))
+                where.Add(portableFilter.Sql);
+            if (!string.IsNullOrWhiteSpace(candidateQuery.AdditionalWhereSql))
+                where.Add($"({candidateQuery.AdditionalWhereSql})");
+            if (candidateQuery.IncludeFields is { } fields)
+            {
+                if (fields.Count == 0)
+                    where.Add("1 = 0");
+                else
+                    where.Add($"{fieldName} IN ({string.Join(", ", fields.Select((_, index) => $"$ote_field_{index}"))})");
+            }
+
+            var distance = $"vec_distance_cosine({vectorColumn}, {vectorConstructor}($ote_query))";
+            sql = $"""
+                WITH filtered AS MATERIALIZED (
+                    SELECT {itemKey} AS ote_item_key,
+                           {fieldName} AS ote_field_name,
+                           {recordJson} AS ote_record_json,
+                           {weight} AS ote_field_weight,
+                           {distance} AS ote_distance
+                    FROM {table}
+                    WHERE {string.Join(" AND ", where)}
+                )
+                SELECT ote_item_key,
+                       ote_field_name,
+                       ote_record_json,
+                       ote_field_weight,
+                       1.0 - ote_distance AS native_similarity
+                FROM filtered
+                ORDER BY ote_distance
+                LIMIT $ote_candidate_count
+                """;
+            retrievalMode = $"{candidateQuery.StorageKind}/FilteredExactScan";
+            filterToBind = portableFilter;
+        }
 
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
@@ -158,7 +220,7 @@ public sealed class SqliteVecSemanticSearch(ISemanticCandidateReranker reranker)
             ? query.Vector.ConvertTo(EmbeddingVectorFormat.Int8)
             : query.Vector.ConvertTo(EmbeddingVectorFormat.Float32);
         command.Parameters.Add("$ote_query", SqliteType.Blob).Value = vector.Data;
-        foreach (var parameter in portableFilter.Parameters)
+        foreach (var parameter in filterToBind.Parameters)
             command.Parameters.AddWithValue("@" + parameter.Name, parameter.Value ?? DBNull.Value);
         if (candidateQuery.IncludeFields is { } included)
         {
@@ -191,12 +253,58 @@ public sealed class SqliteVecSemanticSearch(ISemanticCandidateReranker reranker)
             Retrieval = new SemanticCandidateRetrievalInfo
             {
                 Provider = "SQLite/sqlite-vec",
-                Mode = candidateQuery.StorageKind.ToString(),
+                Mode = retrievalMode,
                 RequestedCandidateCount = candidateCount,
                 ReturnedCandidateCount = results.Count,
                 Approximate = false
             }
         };
+    }
+
+    private static bool TryCompileKnnFilter(
+        SearchFilter? filter,
+        IReadOnlyDictionary<string, string> columns,
+        HashSet<string> usedPhysicalColumns,
+        out CompiledSearchFilter compiled)
+    {
+        var parameters = new List<SearchFilterSqlParameter>();
+        var clauses = new List<string>();
+        var supported = filter is null || TryAppend(filter);
+        compiled = supported
+            ? new CompiledSearchFilter(string.Join(" AND ", clauses), parameters)
+            : new CompiledSearchFilter(string.Empty, Array.Empty<SearchFilterSqlParameter>());
+        return supported;
+
+        bool TryAppend(SearchFilter current)
+        {
+            if (current is SearchLogicalFilter { Operator: SearchLogicalOperator.And } logical)
+                return logical.Filters.All(TryAppend);
+            if (current is not SearchComparisonFilter comparison || comparison.Value is null)
+                return false;
+            if (comparison.Operator == SearchComparisonOperator.NotEqual)
+                return false; // NULL != value is true in the portable evaluator but not in SQL three-valued logic.
+
+            var physical = ResolveFilterColumn(columns, comparison.Field);
+            if (!usedPhysicalColumns.Add(physical))
+                return false; // vec0 permits at most one KNN metadata constraint per metadata column.
+
+            var op = comparison.Operator switch
+            {
+                SearchComparisonOperator.Equal => "=",
+                SearchComparisonOperator.GreaterThan => ">",
+                SearchComparisonOperator.GreaterThanOrEqual => ">=",
+                SearchComparisonOperator.LessThan => "<",
+                SearchComparisonOperator.LessThanOrEqual => "<=",
+                _ => null
+            };
+            if (op is null)
+                return false;
+
+            var name = $"ote_filter_{parameters.Count}";
+            parameters.Add(new SearchFilterSqlParameter(name, comparison.Value));
+            clauses.Add($"{QuoteIdentifier(physical)} {op} @{name}");
+            return true;
+        }
     }
 
     private static string ResolveFilterColumn(IReadOnlyDictionary<string, string> columns, string logical)
