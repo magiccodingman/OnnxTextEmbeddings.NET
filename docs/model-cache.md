@@ -1,25 +1,71 @@
-# Model cache and updates
+# Model artifacts, cache, and updates
 
-The cache is snapshot-based rather than a mutable directory of half-downloaded files.
+OnnxTextEmbeddings.NET now delegates generic artifact acquisition/cache mechanics to the reusable `ModelArtifacts.NET` NuGet package while retaining all embedding-specific validation and identity policy.
+
+## Ownership
+
+`ModelArtifacts.NET` owns:
+
+```text
+source revision resolution
+explicit artifact selection
+download/retry/Retry-After handling
+path safety
+size/SHA-256 transfer verification
+staging
+cross-process cache locking
+candidate snapshots
+offline current-snapshot fallback
+atomic promotion/discard
+cleanup
+```
+
+OnnxTextEmbeddings.NET owns:
+
+```text
+Jasper/custom source presets
+required ONNX/tokenizer selection
+embedding manifest interpretation
+model token limits
+tokenizer construction
+ONNX embedding contract validation
+pooling/normalization
+embedding-space fingerprint compatibility
+```
 
 ## Activation sequence
 
-1. Resolve a candidate revision.
-2. Acquire the cache lock.
-3. Download into staging using streamed HTTP I/O.
-4. Validate paths, expected lengths, and provided hashes.
-5. Resolve model/tokenizer runtime files and compute the embedding-space fingerprint.
-6. Load the candidate tokenizer and ONNX worker pool.
-7. Promote the candidate snapshot atomically.
-8. Swap the active runtime.
-9. Dispose previous ONNX sessions/tokenizer.
-10. Delete old snapshots.
+A downloaded artifact is deliberately **not** active just because transfer verification succeeded.
 
-A partial candidate is never the active snapshot.
+```text
+ModelArtifacts.ResolveCandidateAsync
+          ↓
+verified candidate snapshot
+          ↓
+OnnxTextEmbeddings resolves model/tokenizer files
+          ↓
+create tokenizer
+          ↓
+create OnnxModelRuntime + embedding executor
+          ↓
+run real validation inference
+          ↓ success
+ModelArtifacts.PromoteAsync
+          ↓
+swap active tokenizer/runtime
+          ↓
+dispose old runtime/tokenizer
+          ↓
+ModelArtifacts.CleanupAsync
+```
 
-## Failure behavior
+If application validation fails, the candidate is discarded and the previous current snapshot is untouched.
 
-If no working runtime exists, initialization failures surface to the caller and status becomes `Faulted`. If an update fails while a valid runtime is already serving requests, the existing runtime remains active and status records the update error.
+## Offline behavior
+
+When a remote source cannot be resolved but a valid current managed snapshot exists, ModelArtifacts returns that current snapshot as an offline fallback. The embedding service can therefore continue starting/serving with known-good artifacts during a Hugging Face/CDN/network outage.
+
+Without any current snapshot, the source failure is surfaced normally.
 
 ## Hot swap
 
@@ -27,12 +73,22 @@ If no working runtime exists, initialization failures surface to the caller and 
 bool changed = await embeddingService.UpdateModelAsync();
 ```
 
-New requests use the new worker pool after the swap. Work already running may complete against the previous pool. Old sessions are disposed before physical snapshot deletion, preventing common Windows locked-file failures.
+A new candidate is fully tokenizer/runtime validated before promotion. Only after it works does the service swap references. Requests already executing may finish on the previous `OnnxModelRuntime`; new requests use the replacement after the swap.
 
-## Embedding-space changes
+Old sessions are disposed before old managed snapshots are cleaned, avoiding common Windows locked-native-file failures.
 
-A changed fingerprint means application-persisted vectors must be regenerated before they can be compared with queries from the new space. Search throws `EmbeddingSpaceMismatchException` rather than returning invalid rankings.
+## Artifact fingerprint vs embedding-space fingerprint
+
+These are intentionally different responsibilities.
+
+`ArtifactFingerprint` belongs to ModelArtifacts.NET and identifies the selected acquired files/content.
+
+`EmbeddingSpaceFingerprint` belongs to OnnxTextEmbeddings.NET and is persisted with vectors to answer a stronger question: can these vectors legitimately be compared?
+
+The refactor preserves the historical OnnxTextEmbeddings fingerprint algorithm over the embedding runtime asset subset so existing persisted vectors are not invalidated merely because generic cache ownership moved into ModelArtifacts.NET.
+
+A genuine embedding-space fingerprint change still means persisted vectors need regeneration before comparison with new queries. Search throws `EmbeddingSpaceMismatchException` instead of returning invalid rankings.
 
 ## Multiple processes
 
-Cache operations use a cross-process lock and retry delay. This prevents two application instances starting at the same time from racing to activate a partially written snapshot.
+Cross-process cache locking, atomic `current.json` activation, abandoned staging cleanup, and locked-file deletion retries are now supplied by ModelArtifacts.NET rather than duplicate code in this repository.
