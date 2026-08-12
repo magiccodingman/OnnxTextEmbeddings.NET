@@ -77,102 +77,90 @@ public sealed class PgVectorSemanticSearch(ISemanticCandidateReranker reranker)
         options ??= new DatabaseSemanticSearchOptions();
         var candidateCount = options.ResolveCandidateCount();
 
-        NpgsqlTransaction? ownedTransaction = null;
-        var effectiveTransaction = transaction;
-        try
-        {
-            if (candidateQuery.SearchMode == PgVectorSearchMode.Exact && effectiveTransaction is null)
-            {
-                ownedTransaction = (NpgsqlTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-                effectiveTransaction = ownedTransaction;
-            }
+        var itemKey = QuoteIdentifier(candidateQuery.ItemKeyColumn);
+        var fieldName = QuoteIdentifier(candidateQuery.FieldNameColumn);
+        var recordJson = QuoteIdentifier(candidateQuery.RecordJsonColumn);
+        var fingerprint = QuoteIdentifier(candidateQuery.FingerprintColumn);
+        var vectorColumn = QuoteIdentifier(candidateQuery.VectorColumn);
+        var table = QuoteIdentifierPath(candidateQuery.Table);
+        var distance = $"{vectorColumn} <=> @ote_query";
+        var weight = candidateQuery.FieldWeightColumn is null
+            ? "CAST(1.0 AS real)"
+            : QuoteIdentifier(candidateQuery.FieldWeightColumn);
+        var extraWhere = string.IsNullOrWhiteSpace(candidateQuery.AdditionalWhereSql)
+            ? string.Empty
+            : $" AND ({candidateQuery.AdditionalWhereSql})";
 
-            if (candidateQuery.SearchMode == PgVectorSearchMode.Exact)
-            {
-                await using var exact = new NpgsqlCommand(
-                    "SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off;",
-                    connection,
-                    effectiveTransaction);
-                await exact.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            var vectorColumn = QuoteIdentifier(candidateQuery.VectorColumn);
-            var distance = $"{vectorColumn} <=> @ote_query";
-            var weight = candidateQuery.FieldWeightColumn is null
-                ? "CAST(1.0 AS real)"
-                : QuoteIdentifier(candidateQuery.FieldWeightColumn);
-            var extraWhere = string.IsNullOrWhiteSpace(candidateQuery.AdditionalWhereSql)
-                ? string.Empty
-                : $" AND ({candidateQuery.AdditionalWhereSql})";
-
-            var sql = $"""
-                SELECT {QuoteIdentifier(candidateQuery.ItemKeyColumn)},
-                       {QuoteIdentifier(candidateQuery.FieldNameColumn)},
-                       {QuoteIdentifier(candidateQuery.RecordJsonColumn)},
+        var sql = candidateQuery.SearchMode == PgVectorSearchMode.Exact
+            ? $"""
+                WITH ote_exact AS MATERIALIZED (
+                    SELECT {itemKey} AS ote_item_key,
+                           {fieldName} AS ote_field_name,
+                           {recordJson} AS ote_record_json,
+                           {weight} AS ote_field_weight,
+                           ({distance}) AS ote_distance
+                    FROM {table}
+                    WHERE {fingerprint} = @ote_fingerprint{extraWhere}
+                )
+                SELECT ote_item_key,
+                       ote_field_name,
+                       ote_record_json,
+                       ote_field_weight,
+                       1.0 - ote_distance AS native_similarity
+                FROM ote_exact
+                ORDER BY ote_distance
+                LIMIT @ote_candidate_count
+                """
+            : $"""
+                SELECT {itemKey},
+                       {fieldName},
+                       {recordJson},
                        {weight},
                        1.0 - ({distance}) AS native_similarity
-                FROM {QuoteIdentifierPath(candidateQuery.Table)}
-                WHERE {QuoteIdentifier(candidateQuery.FingerprintColumn)} = @ote_fingerprint{extraWhere}
+                FROM {table}
+                WHERE {fingerprint} = @ote_fingerprint{extraWhere}
                 ORDER BY {distance}
                 LIMIT @ote_candidate_count
                 """;
 
-            await using var command = new NpgsqlCommand(sql, connection, effectiveTransaction);
-            command.Parameters.AddWithValue("ote_fingerprint", query.Identity.EmbeddingSpaceFingerprint);
-            command.Parameters.AddWithValue("ote_candidate_count", candidateCount);
-            command.Parameters.AddWithValue(
-                "ote_query",
-                candidateQuery.StorageKind == PgVectorStorageKind.HalfVector
-                    ? query.Vector.ToPgHalfVector()
-                    : query.Vector.ToPgVector());
-            configureFilterParameters?.Invoke(command);
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("ote_fingerprint", query.Identity.EmbeddingSpaceFingerprint);
+        command.Parameters.AddWithValue("ote_candidate_count", candidateCount);
+        command.Parameters.AddWithValue(
+            "ote_query",
+            candidateQuery.StorageKind == PgVectorStorageKind.HalfVector
+                ? query.Vector.ToPgHalfVector()
+                : query.Vector.ToPgVector());
+        configureFilterParameters?.Invoke(command);
 
-            var results = new List<SemanticCandidate<TKey>>(candidateCount);
-            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
-            {
-                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    results.Add(new SemanticCandidate<TKey>
-                    {
-                        ItemKey = ReadKey<TKey>(reader.GetValue(0)),
-                        FieldName = reader.GetString(1),
-                        Embedding = EmbeddingSerializer.DeserializeJson(reader.GetString(2)),
-                        FieldWeight = Convert.ToSingle(reader.GetValue(3), CultureInfo.InvariantCulture),
-                        NativeSimilarity = Convert.ToSingle(reader.GetValue(4), CultureInfo.InvariantCulture)
-                    });
-                }
-            }
-
-            if (ownedTransaction is not null)
-                await ownedTransaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-
-            return new SemanticCandidateBatch<TKey>
-            {
-                Candidates = results,
-                Retrieval = new SemanticCandidateRetrievalInfo
-                {
-                    Provider = "PostgreSQL/pgvector",
-                    Mode = candidateQuery.SearchMode.ToString(),
-                    RequestedCandidateCount = candidateCount,
-                    ReturnedCandidateCount = results.Count,
-                    Approximate = candidateQuery.SearchMode == PgVectorSearchMode.Approximate
-                }
-            };
-        }
-        catch
+        var results = new List<SemanticCandidate<TKey>>(candidateCount);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
-            if (ownedTransaction is not null)
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                try { await ownedTransaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); }
-                catch { }
+                results.Add(new SemanticCandidate<TKey>
+                {
+                    ItemKey = ReadKey<TKey>(reader.GetValue(0)),
+                    FieldName = reader.GetString(1),
+                    Embedding = EmbeddingSerializer.DeserializeJson(reader.GetString(2)),
+                    FieldWeight = Convert.ToSingle(reader.GetValue(3), CultureInfo.InvariantCulture),
+                    NativeSimilarity = Convert.ToSingle(reader.GetValue(4), CultureInfo.InvariantCulture)
+                });
             }
-            throw;
         }
-        finally
+
+        return new SemanticCandidateBatch<TKey>
         {
-            if (ownedTransaction is not null)
-                await ownedTransaction.DisposeAsync().ConfigureAwait(false);
-        }
+            Candidates = results,
+            Retrieval = new SemanticCandidateRetrievalInfo
+            {
+                Provider = "PostgreSQL/pgvector",
+                Mode = candidateQuery.SearchMode.ToString(),
+                RequestedCandidateCount = candidateCount,
+                ReturnedCandidateCount = results.Count,
+                Approximate = candidateQuery.SearchMode == PgVectorSearchMode.Approximate
+            }
+        };
     }
 
     private static string QuoteIdentifier(string identifier)
