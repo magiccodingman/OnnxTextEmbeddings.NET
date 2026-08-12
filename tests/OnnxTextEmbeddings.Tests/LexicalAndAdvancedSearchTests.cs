@@ -52,6 +52,39 @@ public sealed class LexicalAndAdvancedSearchTests
     }
 
     [Fact]
+    public void PortableFilters_CompileNullStableAtomicPredicatesForNotComposition()
+    {
+        var values = new Dictionary<string, object?>
+        {
+            ["Status"] = null,
+            ["Category"] = null,
+            ["Title"] = null
+        };
+
+        var notEqual = SearchFilter.NotEqual("Status", "Deleted");
+        var notIn = SearchFilter.NotIn("Category", new[] { "Database", "Infrastructure" });
+        var negatedEqual = SearchFilter.Not(SearchFilter.Equal("Status", "Deleted"));
+        var negatedContains = SearchFilter.Not(SearchFilter.Contains("Title", "backup"));
+
+        Assert.True(SearchFilterEvaluator.Matches(notEqual, values));
+        Assert.True(SearchFilterEvaluator.Matches(notIn, values));
+        Assert.True(SearchFilterEvaluator.Matches(negatedEqual, values));
+        Assert.True(SearchFilterEvaluator.Matches(negatedContains, values));
+
+        var compiledNotEqual = SearchFilterSqlCompiler.Compile(notEqual, field => $"\"{field}\"");
+        var compiledNotIn = SearchFilterSqlCompiler.Compile(notIn, field => $"\"{field}\"");
+        var compiledNegatedEqual = SearchFilterSqlCompiler.Compile(negatedEqual, field => $"\"{field}\"");
+        var compiledNegatedContains = SearchFilterSqlCompiler.Compile(negatedContains, field => $"\"{field}\"");
+
+        Assert.Contains("IS NULL OR", compiledNotEqual.Sql, StringComparison.Ordinal);
+        Assert.Contains("IS NULL OR", compiledNotIn.Sql, StringComparison.Ordinal);
+        Assert.Contains("IS NOT NULL AND", compiledNegatedEqual.Sql, StringComparison.Ordinal);
+        Assert.StartsWith("NOT (", compiledNegatedEqual.Sql, StringComparison.Ordinal);
+        Assert.Contains("IS NOT NULL AND", compiledNegatedContains.Sql, StringComparison.Ordinal);
+        Assert.StartsWith("NOT (", compiledNegatedContains.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task LexicalOnlyAdvancedQuery_DoesNotRequestAnEmbedding()
     {
         var embedding = new ThrowingEmbeddingService();
