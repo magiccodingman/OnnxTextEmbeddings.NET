@@ -4,6 +4,8 @@
   "tagPrefix": "v",
   "packageIds": [
     "OnnxTextEmbeddings.NET",
-    "OnnxTextEmbeddings.NET.PgVector"
+    "OnnxTextEmbeddings.NET.PgVector",
+    "OnnxTextEmbeddings.NET.SqliteVec",
+    "OnnxTextEmbeddings.NET.SqlServer"
   ]
 }

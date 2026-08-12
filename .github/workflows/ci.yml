@@ -41,3 +41,5 @@ jobs:
         run: |
           dotnet pack src/OnnxTextEmbeddings/OnnxTextEmbeddings.csproj --configuration Release --no-build --output artifacts
           dotnet pack src/OnnxTextEmbeddings.PgVector/OnnxTextEmbeddings.PgVector.csproj --configuration Release --no-build --output artifacts
+          dotnet pack src/OnnxTextEmbeddings.SqliteVec/OnnxTextEmbeddings.SqliteVec.csproj --configuration Release --no-build --output artifacts
+          dotnet pack src/OnnxTextEmbeddings.SqlServer/OnnxTextEmbeddings.SqlServer.csproj --configuration Release --no-build --output artifacts
