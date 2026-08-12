@@ -109,7 +109,7 @@ public sealed class SearchQuery
         return this;
     }
 
-    internal void Validate()
+    public void Validate()
     {
         if (stages.Count == 0)
             throw new InvalidOperationException("A SearchQuery requires at least one retrieval stage.");
@@ -118,26 +118,28 @@ public sealed class SearchQuery
         foreach (var stage in stages)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(stage.Name);
-            if (stage.Weight < 0) throw new ArgumentOutOfRangeException(nameof(stage.Weight));
+            if (stage.Weight < 0 || !float.IsFinite(stage.Weight)) throw new ArgumentOutOfRangeException(nameof(stage.Weight));
             if (stage.CandidateCount is <= 0) throw new ArgumentOutOfRangeException(nameof(stage.CandidateCount));
+            if (stage.Fields.Select(field => field.Name).Distinct(StringComparer.Ordinal).Count() != stage.Fields.Count)
+                throw new InvalidOperationException($"Search retrieval stage '{stage.Name}' contains duplicate field names.");
             foreach (var field in stage.Fields)
             {
                 ArgumentException.ThrowIfNullOrWhiteSpace(field.Name);
-                if (field.Weight < 0) throw new ArgumentOutOfRangeException(nameof(field.Weight));
+                if (field.Weight < 0 || !float.IsFinite(field.Weight)) throw new ArgumentOutOfRangeException(nameof(field.Weight));
             }
         }
         if (Fusion.RankConstant < 0) throw new ArgumentOutOfRangeException(nameof(Fusion.RankConstant));
     }
 
-    internal int ResolveCandidateCount(SearchRetrievalStage stage)
+    public int ResolveCandidateCount(SearchRetrievalStage stage)
     {
+        ArgumentNullException.ThrowIfNull(stage);
         if (stage.CandidateCount is { } explicitCount)
             return explicitCount;
         return (int)Math.Min(int.MaxValue, Math.Max(100L, (long)Top * 10L));
     }
 }
 
-/// <summary>Searchable representation of an application item for the in-memory advanced query engine.</summary>
 public sealed class SearchDocument
 {
     private readonly Dictionary<string, object?> values = new(StringComparer.Ordinal);
@@ -225,7 +227,7 @@ public static class SearchRankFusion
         var firstSeen = 0;
         foreach (var ranking in rankings)
         {
-            if (ranking.Weight < 0)
+            if (ranking.Weight < 0 || !float.IsFinite(ranking.Weight))
                 throw new ArgumentOutOfRangeException(nameof(ranking.Weight));
             var seenInStage = new HashSet<TKey>();
             for (var index = 0; index < ranking.Candidates.Count; index++)

@@ -5,6 +5,10 @@ namespace OnnxTextEmbeddings;
 public static class LexicalScoringProfiles
 {
     public const string Bm25V1 = "BM25-v1";
+    public const string SqliteFts5Bm25 = "SQLite-FTS5-BM25";
+    public const string PostgreSqlTsRankCd = "PostgreSQL-ts_rank_cd";
+    public const string PostgreSqlTsRank = "PostgreSQL-ts_rank";
+    public const string SqlServerFullTextRank = "SQLServer-FullText-RANK";
 }
 
 public sealed record LexicalField(string Name, string Text, float Weight = 1f)
@@ -26,7 +30,13 @@ public sealed class LexicalSearchRequest
     }
 }
 
-public sealed record LexicalScoringInfo(string ProfileId, int ProfileVersion, float K1, float B);
+public sealed record LexicalScoringInfo(string ProfileId, int ProfileVersion)
+{
+    public float? K1 { get; init; }
+    public float? B { get; init; }
+    public string? Provider { get; init; }
+    public string? Mode { get; init; }
+}
 
 public sealed record LexicalFieldMatch
 {
@@ -41,6 +51,30 @@ public sealed record LexicalSearchResult<T>
     public required float Score { get; init; }
     public required IReadOnlyList<LexicalFieldMatch> Fields { get; init; }
     public required LexicalScoringInfo Scoring { get; init; }
+}
+
+public sealed class DatabaseLexicalSearchOptions
+{
+    public int Top { get; set; } = 10;
+
+    public void Validate()
+    {
+        if (Top <= 0) throw new ArgumentOutOfRangeException(nameof(Top));
+    }
+}
+
+public sealed record LexicalCandidateRetrievalInfo
+{
+    public required string Provider { get; init; }
+    public required string Mode { get; init; }
+    public required int RequestedCount { get; init; }
+    public required int ReturnedCount { get; init; }
+}
+
+public sealed record DatabaseLexicalSearchResult<TKey> where TKey : notnull
+{
+    public required IReadOnlyList<LexicalSearchResult<TKey>> Results { get; init; }
+    public required LexicalCandidateRetrievalInfo Retrieval { get; init; }
 }
 
 public interface ILexicalSearch
@@ -139,7 +173,13 @@ public sealed class InMemoryLexicalSearch : ILexicalSearch
                     Weight = field.Weight,
                     Score = (float)fieldScores[index]
                 }).Where(match => match.Score > 0).OrderByDescending(match => match.Score).ToArray(),
-                Scoring = new LexicalScoringInfo(LexicalScoringProfiles.Bm25V1, 1, request.K1, request.B)
+                Scoring = new LexicalScoringInfo(LexicalScoringProfiles.Bm25V1, 1)
+                {
+                    K1 = request.K1,
+                    B = request.B,
+                    Provider = "InMemory",
+                    Mode = "BM25"
+                }
             });
         }
 
@@ -152,8 +192,8 @@ public sealed class InMemoryLexicalSearch : ILexicalSearch
     private static PreparedField PrepareField(LexicalField field)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(field.Name);
-        if (field.Weight < 0)
-            throw new ArgumentOutOfRangeException(nameof(field.Weight), "Lexical field weight cannot be negative.");
+        if (field.Weight < 0 || !float.IsFinite(field.Weight))
+            throw new ArgumentOutOfRangeException(nameof(field.Weight), "Lexical field weight must be finite and non-negative.");
         var tokens = Tokenize(field.Text);
         return new PreparedField(
             field.Name,
