@@ -41,6 +41,14 @@ ABI v1 exposes:
 
 Generic `.NET` composition concepts such as `ISemanticSearch<T>` and database command/provider APIs are intentionally not mirrored into C v1.
 
+## Native bundle and sidecars
+
+The Native AOT facade is a self-contained .NET runtime artifact, but it still uses native libraries supplied by model/runtime dependencies such as the Hugging Face tokenizer binding and ONNX Runtime.
+
+Treat the published directory as the native deployment bundle: keep the generated `OnnxTextEmbeddings.Native` shared library and its RID-specific native sidecars together on the host loader path. This is the same practical layout used by a Native-AOT executable that consumes those dependencies directly.
+
+The C integration tests deliberately compile the host executable beside that published bundle so the test exercises the distribution layout a native consumer should preserve.
+
 ## Example C lifecycle
 
 ```c
@@ -74,10 +82,11 @@ ote_service_destroy(service);
 
 The Native AOT workflow:
 
-1. publishes the shared library;
-2. compiles a standalone C program against the public header;
-3. dynamically loads the generated `.so`, `.dll`, or `.dylib`;
-4. validates ABI v1 and exported vector math on Linux, Windows, and macOS;
-5. runs a Linux smoke from C all the way through Native AOT, model download/loading, Jasper INT8 query inference, returned JSON, buffer release, and service destruction.
+1. publishes and executes the managed core as a Native AOT application on Linux, Windows, and macOS;
+2. publishes the Native AOT shared library;
+3. compiles a standalone C program against the public header;
+4. dynamically loads the generated `.so`, `.dll`, or `.dylib` and validates ABI v1 on Linux, Windows, and macOS;
+5. on Linux, loads Jasper INT8 from a managed Native AOT executable;
+6. in the same gate, runs from C all the way through the Native AOT shared library, model loading, Jasper query inference, returned JSON, buffer release, and service destruction.
 
 This is the practical compatibility promise offered to Rust, C++, Go, Zig, Python FFI, Node native wrappers, and other ecosystems: they receive a stable C boundary to bind against without needing to reproduce the C# implementation.

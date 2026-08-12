@@ -34,7 +34,6 @@ jobs:
             $rid = if ($arch -eq 'arm64') { 'osx-arm64' } else { 'osx-x64' }
           }
           else { $rid = 'linux-x64' }
-          "OTE_RID=$rid" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           dotnet publish tests/OnnxTextEmbeddings.AotSmoke/OnnxTextEmbeddings.AotSmoke.csproj `
             --configuration Release --runtime $rid -p:PublishAot=true --output artifacts/aot
       - name: Run Native AOT core smoke
@@ -73,17 +72,17 @@ jobs:
           else { $rid = 'linux-x64' }
           dotnet publish src/OnnxTextEmbeddings.Native/OnnxTextEmbeddings.Native.csproj `
             --configuration Release --runtime $rid -p:PublishAot=true -p:NativeLib=Shared --output artifacts/native
-      - name: Compile C consumer
+      - name: Compile C consumer beside native bundle
         shell: pwsh
         run: |
           if ($IsWindows) {
-            cl /nologo /I native/include native/smoke/c/main.c /Fe:artifacts/native-smoke.exe
+            cl /nologo /I native/include native/smoke/c/main.c /Fe:artifacts/native/native-smoke.exe
           }
           elseif ($IsMacOS) {
-            cc native/smoke/c/main.c -I native/include -lm -o artifacts/native-smoke
+            cc native/smoke/c/main.c -I native/include -lm -o artifacts/native/native-smoke
           }
           else {
-            cc native/smoke/c/main.c -I native/include -ldl -lm -o artifacts/native-smoke
+            cc native/smoke/c/main.c -I native/include -ldl -lm -o artifacts/native/native-smoke
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run C ABI smoke
@@ -92,14 +91,14 @@ jobs:
           $extension = if ($IsWindows) { '.dll' } elseif ($IsMacOS) { '.dylib' } else { '.so' }
           $library = Get-ChildItem artifacts/native -File | Where-Object { $_.Name -like "*OnnxTextEmbeddings.Native*$extension" } | Select-Object -First 1
           if (-not $library) { throw "Native AOT shared library was not produced." }
-          $smoke = if ($IsWindows) { 'artifacts/native-smoke.exe' } else { 'artifacts/native-smoke' }
+          $smoke = if ($IsWindows) { 'artifacts/native/native-smoke.exe' } else { 'artifacts/native/native-smoke' }
           & $smoke $library.FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  native-jasper:
-    name: C ABI Jasper INT8
+  jasper-aot-and-native:
+    name: Native AOT + C ABI Jasper INT8
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -107,13 +106,19 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - name: Publish managed Native AOT Jasper smoke
+        run: dotnet publish tests/OnnxTextEmbeddings.AotSmoke/OnnxTextEmbeddings.AotSmoke.csproj --configuration Release --runtime linux-x64 -p:PublishAot=true --output artifacts/aot-jasper
+      - name: Run Jasper from managed Native AOT executable
+        env:
+          AOT_JASPER_SMOKE: '1'
+        run: ./artifacts/aot-jasper/OnnxTextEmbeddings.AotSmoke
       - name: Publish Native AOT shared library
         run: dotnet publish src/OnnxTextEmbeddings.Native/OnnxTextEmbeddings.Native.csproj --configuration Release --runtime linux-x64 -p:PublishAot=true -p:NativeLib=Shared --output artifacts/native
-      - name: Compile C consumer
-        run: cc native/smoke/c/main.c -I native/include -ldl -lm -o artifacts/native-smoke
+      - name: Compile C consumer beside native bundle
+        run: cc native/smoke/c/main.c -I native/include -ldl -lm -o artifacts/native/native-smoke
       - name: Run Jasper through C ABI
         shell: bash
         run: |
           library=$(find artifacts/native -maxdepth 1 -type f -name '*OnnxTextEmbeddings.Native*.so' | head -n1)
           test -n "$library"
-          ./artifacts/native-smoke "$library" --jasper
+          ./artifacts/native/native-smoke "$library" --jasper
